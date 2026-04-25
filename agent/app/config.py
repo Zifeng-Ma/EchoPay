@@ -43,6 +43,7 @@ class Settings:
 
     # --- bunq ---
     bunq_api_key: str | None
+    bunq_use_sandbox: bool
 
     # --- Supabase (backend service-role — full DB access) ---
     supabase_url: str | None
@@ -65,6 +66,7 @@ class Settings:
         )
         self.anthropic_api_key = _optional("ANTHROPIC_API_KEY")
         self.bunq_api_key = _optional("BUNQ_API_KEY")
+        self.bunq_use_sandbox = os.environ.get("BUNQ_USE_SANDBOX", "true").lower() == "true"
         self.supabase_url = _optional("SUPABASE_URL")
         self.supabase_service_role_key = _optional("SUPABASE_SERVICE_ROLE_KEY")
         self.supabase_jwt_secret = _optional("SUPABASE_JWT_SECRET")

@@ -12,11 +12,8 @@ Notes:
   session-server endpoint rate-limited to 1/30s, so we do it once per process.
 - Amounts are cents internally; converted to bunq's "X.XX" string only at the
   HTTP boundary. Never let float touch currency.
-- BUNQ_USE_SANDBOX is read from env directly here (not via app.config) until
-  the config branch lands; move into Settings afterwards.
 """
 
-import os
 import sys
 from pathlib import Path
 from threading import Lock
@@ -35,16 +32,16 @@ _account_id: int | None = None
 _lock = Lock()
 
 
-def _use_sandbox() -> bool:
-    return os.environ.get("BUNQ_USE_SANDBOX", "true").lower() == "true"
-
-
 def _get_client() -> tuple[BunqClient, int]:
     """Return the authenticated singleton client + cached primary account id."""
     global _client, _account_id
     with _lock:
         if _client is None:
-            c = BunqClient(api_key=settings.bunq_api_key, sandbox=_use_sandbox())
+            if not settings.bunq_api_key:
+                raise RuntimeError(
+                    "BUNQ_API_KEY is not set — add it to agent/.env to use payment routes."
+                )
+            c = BunqClient(api_key=settings.bunq_api_key, sandbox=settings.bunq_use_sandbox)
             c.authenticate()
             _client = c
             _account_id = c.get_primary_account_id()
