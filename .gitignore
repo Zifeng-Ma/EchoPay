@@ -1,0 +1,63 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.idea/
+.vscode/
+
+# Flutter/Dart/Pub
+.dart_tool/
+.packages
+.pub/
+build/
+
+# Flutter specific
+.flutter-plugins
+.flutter-plugins-dependencies
+.metadata
+
+# Generated files
+generated_plugin_registrant.dart
+
+# Android
+**/android/**/gradle-wrapper.jar
+**/android/.gradle/
+**/android/captures/
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+
+# iOS
+**/ios/**/Pods/
+**/ios/**/.symlinks/
+**/ios/**/Flutter/Flutter.framework
+**/ios/**/Flutter/Flutter.podspec
+**/ios/**/Generated.xcconfig
+**/ios/**/Runner.xcworkspace/
+**/ios/**/Runner/GeneratedPluginRegistrant.*
+
+# macOS
+**/macos/**/Flutter/ephemeral/
+**/macos/**/Pods/
+
+# Windows
+**/windows/flutter/ephemeral/
+
+# Linux
+**/linux/flutter/ephemeral/
+
+# Web
+build/web/
+
+# Firebase / environment (optional, if used)
+.env
+.env.*
+google-services.json
+GoogleService-Info.plist
+
+# Coverage
+coverage/
+
+# IntelliJ related
+*.iml

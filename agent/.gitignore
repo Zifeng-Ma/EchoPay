@@ -1,0 +1,30 @@
+# ============================================================
+# agent/.gitignore — Python-specific entries
+# (Root .gitignore handles the common cross-language exclusions)
+# ============================================================
+
+# NEVER commit this file's filled-in twin (.env)
+.env
+.env.local
+
+# bunq toolkit cache
+.bunq_context.json
+bunq_context.json
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# uv lockfile (optional — can commit if reproducible installs needed)
+# uv.lock
