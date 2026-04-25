@@ -48,6 +48,7 @@ class VoiceOrderService {
   Future<VoiceOrderResult> stopListening({
     String conversationContext = '',
     String language = 'en',
+    int turnCount = 1,
   }) async {
     final recordingPath = await _recorder.stop() ?? _activeRecordingPath;
     _activeRecordingPath = null;
@@ -59,7 +60,8 @@ class VoiceOrderService {
     final request =
         http.MultipartRequest('POST', Uri.parse('$_baseUrl/voice-order'))
           ..fields['conversation_context'] = conversationContext
-          ..fields['language'] = language;
+          ..fields['language'] = language
+          ..fields['turn_count'] = '$turnCount';
 
     if (kIsWeb) {
       final audioBytes = await _readWebRecordingBytes(recordingPath);
@@ -99,6 +101,7 @@ class VoiceOrderService {
   Future<VoiceOrderResult> analyzeTranscript({
     required String transcript,
     String conversationContext = '',
+    int turnCount = 1,
   }) async {
     final response = await _client.post(
       Uri.parse('$_baseUrl/payment-draft'),
@@ -106,6 +109,7 @@ class VoiceOrderService {
       body: jsonEncode({
         'transcript': transcript,
         'conversation_context': conversationContext,
+        'turn_count': turnCount,
       }),
     );
 

@@ -174,6 +174,14 @@ class VoiceOrderResult {
     required this.splitRequested,
     required this.splitSummary,
     required this.splitPaymentRequests,
+    required this.agentResponse,
+    required this.sessionStatus,
+    required this.shouldCallHumanServer,
+    required this.handoffReason,
+    required this.userType,
+    required this.hesitationDetected,
+    required this.turnCount,
+    required this.turnLimitReached,
   });
 
   final String transcript;
@@ -193,10 +201,21 @@ class VoiceOrderResult {
   final bool splitRequested;
   final String splitSummary;
   final List<SplitPaymentRequest> splitPaymentRequests;
+  final String agentResponse;
+  final String sessionStatus;
+  final bool shouldCallHumanServer;
+  final String handoffReason;
+  final String userType;
+  final bool hesitationDetected;
+  final int turnCount;
+  final bool turnLimitReached;
 
   double? get paymentAmountValue => double.tryParse(paymentAmount);
   bool get hasPayableAmount => paymentAmountValue != null;
   bool get hasSplitRequests => splitPaymentRequests.isNotEmpty;
+  bool get isCompleted => sessionStatus == 'completed';
+  bool get needsHuman =>
+      sessionStatus == 'needs_human' || shouldCallHumanServer;
 
   factory VoiceOrderResult.fromJson(Map<String, dynamic> json) {
     final rawItems = json['order_items'] as List<dynamic>? ?? const [];
@@ -241,6 +260,14 @@ class VoiceOrderResult {
           .whereType<Map<String, dynamic>>()
           .map(SplitPaymentRequest.fromJson)
           .toList(),
+      agentResponse: json['agent_response'] as String? ?? '',
+      sessionStatus: json['session_status'] as String? ?? 'ordering',
+      shouldCallHumanServer: json['should_call_human_server'] as bool? ?? false,
+      handoffReason: json['handoff_reason'] as String? ?? '',
+      userType: json['user_type'] as String? ?? 'unknown',
+      hesitationDetected: json['hesitation_detected'] as bool? ?? false,
+      turnCount: json['turn_count'] as int? ?? 1,
+      turnLimitReached: json['turn_limit_reached'] as bool? ?? false,
     );
   }
 
@@ -267,6 +294,14 @@ class VoiceOrderResult {
       'split_payment_requests': splitPaymentRequests
           .map((request) => request.toJson())
           .toList(),
+      'agent_response': agentResponse,
+      'session_status': sessionStatus,
+      'should_call_human_server': shouldCallHumanServer,
+      'handoff_reason': handoffReason,
+      'user_type': userType,
+      'hesitation_detected': hesitationDetected,
+      'turn_count': turnCount,
+      'turn_limit_reached': turnLimitReached,
     };
   }
 }

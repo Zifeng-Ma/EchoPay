@@ -6,7 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import 'models/voice_order_result.dart';
-import 'services/checkout_session_store.dart';
+import 'services/voice_agent_tts_service.dart';
 import 'services/voice_order_service.dart';
 
 void main() {
@@ -38,16 +38,108 @@ class EchoPayApp extends StatelessWidget {
 
 // --- Providers ---
 
-final orderStatusProvider = StateProvider<String>((ref) => 'idle');
-final cartProvider = StateProvider<List<MenuItem>>((ref) => []);
+final tableOrdersProvider =
+    StateNotifierProvider<TableOrdersNotifier, List<TableOrder>>(
+      (ref) => TableOrdersNotifier(),
+    );
 
-class MenuItem {
-  final String id;
-  final String name;
-  final double price;
-  final String image;
+class TableOrder {
+  const TableOrder({
+    required this.tableNumber,
+    required this.status,
+    required this.turnCount,
+    required this.items,
+    required this.summary,
+    required this.userType,
+    required this.requiresHuman,
+    required this.handoffReason,
+  });
 
-  MenuItem(this.id, this.name, this.price, this.image);
+  final int tableNumber;
+  final String status;
+  final int turnCount;
+  final List<String> items;
+  final String summary;
+  final String userType;
+  final bool requiresHuman;
+  final String handoffReason;
+
+  String get label => 'Table $tableNumber';
+
+  TableOrder copyWith({
+    String? status,
+    int? turnCount,
+    List<String>? items,
+    String? summary,
+    String? userType,
+    bool? requiresHuman,
+    String? handoffReason,
+  }) {
+    return TableOrder(
+      tableNumber: tableNumber,
+      status: status ?? this.status,
+      turnCount: turnCount ?? this.turnCount,
+      items: items ?? this.items,
+      summary: summary ?? this.summary,
+      userType: userType ?? this.userType,
+      requiresHuman: requiresHuman ?? this.requiresHuman,
+      handoffReason: handoffReason ?? this.handoffReason,
+    );
+  }
+}
+
+class TableOrdersNotifier extends StateNotifier<List<TableOrder>> {
+  TableOrdersNotifier() : super(const []);
+
+  int _nextTableNumber = 1;
+
+  int startTable() {
+    final tableNumber = _nextTableNumber++;
+    state = [
+      TableOrder(
+        tableNumber: tableNumber,
+        status: 'ordering',
+        turnCount: 0,
+        items: const [],
+        summary: 'AI waiter is ready to take the order.',
+        userType: 'unknown',
+        requiresHuman: false,
+        handoffReason: '',
+      ),
+      ...state,
+    ];
+    return tableNumber;
+  }
+
+  void updateFromResult(int tableNumber, VoiceOrderResult result) {
+    final items = result.orderItems
+        .map(
+          (item) => item.notes.isEmpty
+              ? item.displayName
+              : '${item.displayName} (${item.notes})',
+        )
+        .toList();
+
+    state = [
+      for (final order in state)
+        if (order.tableNumber == tableNumber)
+          order.copyWith(
+            status: result.needsHuman
+                ? 'needs_human'
+                : (result.isCompleted ? 'completed' : 'ordering'),
+            turnCount: result.turnCount,
+            items: items,
+            summary: result.shortSummary.isEmpty
+                ? result.agentResponse
+                : result.shortSummary,
+            userType: result.userType,
+            requiresHuman: result.needsHuman,
+            handoffReason: result.handoffReason,
+          )
+        else
+          order,
+    ];
+  }
 }
 
 // --- Screens ---
@@ -178,41 +270,42 @@ class CustomerAgentScreen extends ConsumerStatefulWidget {
 
 class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
   static const String _demoTranscript =
-      'Customer says two cappuccinos and one croissant. Merchant confirms total is 11.50 euro. '
-      'Customer says actually make that one cappuccino, total 8.50 euro.';
+      'Hi, I would like one cappuccino and one croissant. Actually make it two cappuccinos. That is all.';
 
-  final CheckoutSessionStore _sessionStore = CheckoutSessionStore();
   final VoiceOrderService _voiceOrderService = VoiceOrderService();
+  final VoiceAgentTtsService _ttsService = VoiceAgentTtsService();
   final List<VoiceOrderResult> _history = [];
-  final TextEditingController _transcriptController = TextEditingController();
 
   StreamSubscription<dynamic>? _amplitudeSubscription;
   bool _isListening = false;
   bool _isProcessing = false;
-  bool _isRestoringSession = true;
+  bool _sessionClosed = false;
   DateTime? _recordingStartedAt;
   double _inputLevel = 0;
+  int _turnCount = 0;
+  int? _currentTableNumber;
   String _agentText =
-      "Capture a spoken checkout and I will turn it into a bunq payment request draft.";
-  String _userTranscript = "";
+      'Hi, welcome to EchoPay. What would you like to order today?';
   VoiceOrderResult? _latestResult;
 
   @override
   void initState() {
     super.initState();
-    _restoreSession();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _startNewSession(announce: true);
+    });
   }
 
   @override
   void dispose() {
     _amplitudeSubscription?.cancel();
-    _transcriptController.dispose();
+    unawaited(_ttsService.dispose());
     _voiceOrderService.dispose();
     super.dispose();
   }
 
   Future<void> _toggleListening() async {
-    if (_isProcessing) {
+    if (_isProcessing || _currentTableNumber == null) {
       return;
     }
 
@@ -221,7 +314,12 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
       return;
     }
 
+    if (_sessionClosed) {
+      return;
+    }
+
     try {
+      await _ttsService.stop();
       await _voiceOrderService.startListening();
       await _amplitudeSubscription?.cancel();
       _amplitudeSubscription = _voiceOrderService.amplitudeStream().listen((
@@ -240,15 +338,12 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
         _isListening = true;
         _recordingStartedAt = DateTime.now();
         _inputLevel = 0;
-        _agentText =
-            'I am listening now. Let the merchant and customer speak, then tap again to stop.';
+        _agentText = 'I am listening. Tell me your order when you are ready.';
       });
-      _persistSession();
     } catch (error) {
       setState(() {
         _agentText = 'I could not start the microphone. ${error.toString()}';
       });
-      _persistSession();
     }
   }
 
@@ -264,12 +359,11 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
         _recordingStartedAt = null;
         _inputLevel = 0;
         _agentText =
-            'Keep recording for at least 2 seconds so I can hear the checkout clearly.';
+            'Keep speaking for at least 2 seconds so I can hear the order clearly.';
       });
       await _amplitudeSubscription?.cancel();
       _amplitudeSubscription = null;
       await _voiceOrderService.cancelListening();
-      _persistSession();
       return;
     }
 
@@ -278,7 +372,7 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
       _isProcessing = true;
       _recordingStartedAt = null;
       _inputLevel = 0;
-      _agentText = 'Turning speech into a payment request draft...';
+      _agentText = 'Let me think through that order...';
     });
     await _amplitudeSubscription?.cancel();
     _amplitudeSubscription = null;
@@ -286,24 +380,28 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
     try {
       final result = await _voiceOrderService.stopListening(
         conversationContext: _buildConversationContext(),
+        turnCount: _turnCount + 1,
       );
 
       setState(() {
         _isProcessing = false;
         _inputLevel = 0;
-        _userTranscript = result.transcript;
         _latestResult = result;
         _history.add(result);
-        _agentText = result.finalConfirmation;
+        _turnCount = result.turnCount;
+        _sessionClosed = result.needsHuman || result.isCompleted;
+        _agentText = _responseFor(result);
       });
-      _persistSession();
+      ref
+          .read(tableOrdersProvider.notifier)
+          .updateFromResult(_currentTableNumber!, result);
+      unawaited(_ttsService.speak(_agentText));
     } catch (error) {
       setState(() {
         _isProcessing = false;
         _inputLevel = 0;
         _agentText = 'I could not process that recording. ${error.toString()}';
       });
-      _persistSession();
     }
   }
 
@@ -311,153 +409,69 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
     final trimmed = transcript.trim();
     if (trimmed.isEmpty) {
       setState(() {
-        _agentText = 'Please enter or paste a transcript first.';
+        _agentText = 'I still need an order before I can continue.';
       });
-      _persistSession();
       return;
     }
 
     setState(() {
       _isProcessing = true;
       _inputLevel = 0;
-      _agentText = 'Analyzing transcript and building a payment draft...';
+      _agentText = 'Running a sample ordering turn...';
     });
 
     try {
       final result = await _voiceOrderService.analyzeTranscript(
         transcript: trimmed,
         conversationContext: _buildConversationContext(),
+        turnCount: _turnCount + 1,
       );
 
       setState(() {
         _isProcessing = false;
-        _userTranscript = result.transcript;
         _latestResult = result;
         _history.add(result);
-        _agentText = result.finalConfirmation;
+        _turnCount = result.turnCount;
+        _sessionClosed = result.needsHuman || result.isCompleted;
+        _agentText = _responseFor(result);
       });
-      _persistSession();
+      ref
+          .read(tableOrdersProvider.notifier)
+          .updateFromResult(_currentTableNumber!, result);
+      unawaited(_ttsService.speak(_agentText));
     } catch (error) {
       setState(() {
         _isProcessing = false;
         _agentText = 'I could not analyze that transcript. ${error.toString()}';
       });
-      _persistSession();
     }
   }
 
-  Future<void> _restoreSession() async {
-    final snapshot = await _sessionStore.load();
-    if (!mounted) {
-      return;
-    }
+  Future<void> _startNewSession({bool announce = false}) async {
+    await _amplitudeSubscription?.cancel();
+    _amplitudeSubscription = null;
+    await _voiceOrderService.cancelListening();
+    await _ttsService.stop();
+
+    final tableNumber = ref.read(tableOrdersProvider.notifier).startTable();
+    const greeting =
+        'Hi, welcome to EchoPay. What would you like to order today?';
 
     setState(() {
-      _isRestoringSession = false;
-      if (snapshot == null) {
-        return;
-      }
-
-      _agentText = snapshot.agentText.isEmpty ? _agentText : snapshot.agentText;
-      _userTranscript = snapshot.userTranscript;
-      _history
-        ..clear()
-        ..addAll(snapshot.history);
-      _latestResult = snapshot.latestResult;
-    });
-  }
-
-  Future<void> _persistSession() async {
-    await _sessionStore.save(
-      CheckoutSessionSnapshot(
-        agentText: _agentText,
-        userTranscript: _userTranscript,
-        history: List<VoiceOrderResult>.from(_history),
-      ),
-    );
-  }
-
-  Future<void> _resetSession() async {
-    setState(() {
-      _agentText =
-          "Capture a spoken checkout and I will turn it into a bunq payment request draft.";
-      _userTranscript = "";
-      _latestResult = null;
+      _currentTableNumber = tableNumber;
+      _agentText = greeting;
       _history.clear();
+      _latestResult = null;
+      _turnCount = 0;
       _recordingStartedAt = null;
       _isListening = false;
       _isProcessing = false;
+      _sessionClosed = false;
       _inputLevel = 0;
     });
-    await _amplitudeSubscription?.cancel();
-    _amplitudeSubscription = null;
-    await _sessionStore.clear();
-  }
-
-  Future<void> _showTranscriptInputSheet() async {
-    _transcriptController.text = _userTranscript;
-
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      builder: (context) {
-        return Padding(
-          padding: EdgeInsets.only(
-            left: 20,
-            right: 20,
-            top: 20,
-            bottom: MediaQuery.of(context).viewInsets.bottom + 20,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Paste Transcript',
-                style: GoogleFonts.lexend(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _transcriptController,
-                minLines: 4,
-                maxLines: 7,
-                decoration: const InputDecoration(
-                  hintText:
-                      'Example: Two cappuccinos and one croissant, total 11.50 euro.',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 14),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () {
-                        _transcriptController.text = _demoTranscript;
-                      },
-                      child: const Text('Use Sample'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.pop(context);
-                        _analyzeTranscript(_transcriptController.text);
-                      },
-                      child: const Text('Analyze'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        );
-      },
-    );
+    if (announce) {
+      unawaited(_ttsService.speak(greeting));
+    }
   }
 
   void _showPaymentSheet(VoiceOrderResult result) {
@@ -475,19 +489,28 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
     }
 
     final buffer = StringBuffer();
-    final recentTurns = _history.length <= 4
+    final recentTurns = _history.length <= 6
         ? _history
-        : _history.sublist(_history.length - 4);
+        : _history.sublist(_history.length - 6);
 
     for (final turn in recentTurns) {
-      buffer.writeln('Transcript: ${turn.transcript}');
+      buffer.writeln('Turn count: ${turn.turnCount}');
+      buffer.writeln('AI reply: ${_responseFor(turn)}');
       buffer.writeln('Summary: ${turn.shortSummary}');
-      buffer.writeln('Confirmation: ${turn.finalConfirmation}');
+      buffer.writeln('Status: ${turn.sessionStatus}');
       if (turn.paymentAmount.isNotEmpty) {
         buffer.writeln('Amount: ${turn.paymentAmount} ${turn.currency}');
       }
+      if (turn.orderItems.isNotEmpty) {
+        buffer.writeln(
+          'Items: ${turn.orderItems.map((item) => item.displayName).join(", ")}',
+        );
+      }
       if (turn.contradictions.isNotEmpty) {
         buffer.writeln('Contradictions: ${turn.contradictions.join(" | ")}');
+      }
+      if (turn.handoffReason.isNotEmpty) {
+        buffer.writeln('Handoff reason: ${turn.handoffReason}');
       }
       if (turn.splitSummary.isNotEmpty) {
         buffer.writeln('Split: ${turn.splitSummary}');
@@ -497,25 +520,44 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
     return buffer.toString().trim();
   }
 
+  String _responseFor(VoiceOrderResult result) {
+    if (result.agentResponse.trim().isNotEmpty) {
+      return result.agentResponse.trim();
+    }
+    if (result.finalConfirmation.trim().isNotEmpty) {
+      return result.finalConfirmation.trim();
+    }
+    return 'I am ready for the next part of your order.';
+  }
+
+  String _statusLabel() {
+    if (_latestResult == null) {
+      return 'ordering';
+    }
+    return _latestResult!.sessionStatus.replaceAll('_', ' ');
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.grey[50],
       appBar: AppBar(
-        title: Text('EchoPay Checkout Agent', style: GoogleFonts.lexend()),
+        title: Text('EchoPay AI Waiter', style: GoogleFonts.lexend()),
         centerTitle: true,
         backgroundColor: Colors.transparent,
         elevation: 0,
         actions: [
           IconButton(
-            tooltip: 'Paste transcript',
-            onPressed: _showTranscriptInputSheet,
-            icon: const Icon(Icons.keyboard_alt_outlined),
+            tooltip: 'Run sample',
+            onPressed: _sessionClosed
+                ? null
+                : () => _analyzeTranscript(_demoTranscript),
+            icon: const Icon(Icons.bolt_outlined),
           ),
           IconButton(
-            tooltip: 'Run sample',
-            onPressed: () => _analyzeTranscript(_demoTranscript),
-            icon: const Icon(Icons.bolt_outlined),
+            tooltip: 'New table',
+            onPressed: _startNewSession,
+            icon: const Icon(Icons.refresh),
           ),
         ],
       ),
@@ -523,38 +565,64 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(24),
         children: [
-          const SizedBox(height: 32),
-          if (_isRestoringSession)
-            const Padding(
-              padding: EdgeInsets.only(bottom: 20),
-              child: LinearProgressIndicator(),
-            ),
-          if (_history.isNotEmpty)
+          if (_currentTableNumber != null)
             Container(
               width: double.infinity,
               margin: const EdgeInsets.only(bottom: 20),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              padding: const EdgeInsets.all(18),
               decoration: BoxDecoration(
-                color: const Color(0xFFF5FBFA),
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: const Color(0xFFD0ECE7)),
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: const Color(0xFFD6ECE7)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.04),
+                    blurRadius: 12,
+                  ),
+                ],
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.history, color: Color(0xFF00A697)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      'Session restored: ${_history.length} captured turn${_history.length == 1 ? '' : 's'}.',
-                      style: GoogleFonts.lexend(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
+                  Container(
+                    width: 54,
+                    height: 54,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE9F9F7),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Center(
+                      child: Text(
+                        '$_currentTableNumber',
+                        style: GoogleFonts.lexend(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          color: const Color(0xFF00A697),
+                        ),
                       ),
                     ),
                   ),
-                  TextButton(
-                    onPressed: _resetSession,
-                    child: const Text('New session'),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Table $_currentTableNumber',
+                          style: GoogleFonts.lexend(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Turns: $_turnCount • ${_latestResult?.userType ?? "unknown"} user • ${_statusLabel()}',
+                          style: GoogleFonts.lexend(
+                            fontSize: 13,
+                            color: Colors.black54,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -575,7 +643,7 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
               ),
               InkWell(
                 customBorder: const CircleBorder(),
-                onTap: _toggleListening,
+                onTap: _sessionClosed ? null : _toggleListening,
                 child: Container(
                   width: 108,
                   height: 108,
@@ -612,9 +680,13 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
           ),
           const SizedBox(height: 16),
           Text(
-            _isListening
-                ? 'Tap to stop listening'
-                : 'Tap to start a payment capture session',
+            _sessionClosed
+                ? (_latestResult?.needsHuman ?? false)
+                      ? 'A real server has been called to the table'
+                      : 'Order completed'
+                : (_isListening
+                      ? 'Tap to stop listening'
+                      : 'Tap to speak to the AI waiter'),
             style: GoogleFonts.lexend(fontSize: 14, color: Colors.grey[700]),
           ),
           if (_isListening) ...[
@@ -641,14 +713,16 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
             runSpacing: 10,
             children: [
               OutlinedButton.icon(
-                onPressed: _showTranscriptInputSheet,
-                icon: const Icon(Icons.keyboard_alt_outlined),
-                label: const Text('Paste transcript'),
+                onPressed: _sessionClosed
+                    ? null
+                    : () => _analyzeTranscript(_demoTranscript),
+                icon: const Icon(Icons.play_arrow_outlined),
+                label: const Text('Demo turn'),
               ),
               OutlinedButton.icon(
-                onPressed: () => _analyzeTranscript(_demoTranscript),
-                icon: const Icon(Icons.play_arrow_outlined),
-                label: const Text('Use sample flow'),
+                onPressed: _startNewSession,
+                icon: const Icon(Icons.add_circle_outline),
+                label: const Text('New table'),
               ),
             ],
           ),
@@ -668,29 +742,18 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
             ),
             child: Column(
               children: [
-                if (_userTranscript.isNotEmpty) ...[
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      'Transcription',
-                      style: GoogleFonts.lexend(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.black54,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    "“$_userTranscript”",
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'AI waiter',
                     style: GoogleFonts.lexend(
-                      fontSize: 16,
-                      fontStyle: FontStyle.italic,
-                      color: Colors.grey[700],
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.black54,
                     ),
                   ),
-                  const Divider(height: 32),
-                ],
+                ),
+                const SizedBox(height: 8),
                 Text(
                   _agentText,
                   textAlign: TextAlign.center,
@@ -706,11 +769,12 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
           if (_latestResult != null) ...[
             const SizedBox(height: 24),
             _VoiceOrderReview(result: _latestResult!),
-            if ((_latestResult!.paymentReady &&
-                    _latestResult!.hasPayableAmount) ||
-                _latestResult!.splitPaymentRequests.any(
-                  (request) => request.hasAmount,
-                )) ...[
+            if (_latestResult!.isCompleted &&
+                ((_latestResult!.paymentReady &&
+                        _latestResult!.hasPayableAmount) ||
+                    _latestResult!.splitPaymentRequests.any(
+                      (request) => request.hasAmount,
+                    ))) ...[
               const SizedBox(height: 18),
               SizedBox(
                 width: double.infinity,
@@ -742,7 +806,7 @@ class _CustomerAgentScreenState extends ConsumerState<CustomerAgentScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _resetSession,
+        onPressed: _startNewSession,
         child: const Icon(Icons.refresh),
       ),
     );
@@ -768,50 +832,64 @@ class _VoiceOrderReview extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Payment Draft',
+            'Table Status',
             style: GoogleFonts.lexend(
               fontSize: 18,
               fontWeight: FontWeight.bold,
             ),
           ),
           const SizedBox(height: 16),
-          if (result.paymentAmount.isNotEmpty) ...[
-            _ReviewSection(
-              title: 'Amount to request',
-              child: Text(
-                '${result.currency} ${result.paymentAmount}',
-                style: GoogleFonts.lexend(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  color: const Color(0xFF00A697),
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
-          ],
-          if (result.merchantName.isNotEmpty ||
-              result.customerName.isNotEmpty) ...[
-            _ReviewSection(
-              title: 'Participants',
-              child: Text(
-                '${result.merchantName.isEmpty ? "Merchant" : result.merchantName}'
-                ' -> ${result.customerName.isEmpty ? "Customer" : result.customerName}',
-                style: GoogleFonts.lexend(fontSize: 15, color: Colors.black87),
-              ),
-            ),
-            const SizedBox(height: 14),
-          ],
           _ReviewSection(
-            title: 'Short recap',
+            title: 'Order state',
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _StatusPill(
+                  label: result.sessionStatus.replaceAll('_', ' '),
+                  color: result.needsHuman
+                      ? const Color(0xFFAD4C2D)
+                      : (result.isCompleted
+                            ? const Color(0xFF00A697)
+                            : const Color(0xFF4A6CF7)),
+                ),
+                _StatusPill(
+                  label: '${result.turnCount} turns',
+                  color: const Color(0xFF56636A),
+                ),
+                _StatusPill(
+                  label: '${result.userType} user',
+                  color: result.userType == 'slow'
+                      ? const Color(0xFFAD6C1A)
+                      : const Color(0xFF00A697),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          _ReviewSection(
+            title: 'Current recap',
             child: Text(
-              result.shortSummary,
+              result.shortSummary.isEmpty
+                  ? 'The AI waiter is still gathering the order.'
+                  : result.shortSummary,
+              style: GoogleFonts.lexend(fontSize: 15, color: Colors.black87),
+            ),
+          ),
+          const SizedBox(height: 14),
+          _ReviewSection(
+            title: 'AI next action',
+            child: Text(
+              result.agentResponse.isEmpty
+                  ? result.finalConfirmation
+                  : result.agentResponse,
               style: GoogleFonts.lexend(fontSize: 15, color: Colors.black87),
             ),
           ),
           if (result.orderItems.isNotEmpty) ...[
             const SizedBox(height: 14),
             _ReviewSection(
-              title: 'Line items',
+              title: 'Items in progress',
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: result.orderItems
@@ -846,124 +924,44 @@ class _VoiceOrderReview extends StatelessWidget {
               ),
             ),
           ],
-          if (result.speakerTurns.isNotEmpty) ...[
+          if (result.paymentAmount.isNotEmpty && result.isCompleted) ...[
             const SizedBox(height: 14),
             _ReviewSection(
-              title: 'Speaker timeline',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: result.speakerTurns
-                    .map(
-                      (turn) => Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(color: const Color(0xFFE1ECE9)),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Text(
-                                    turn.speakerLabel,
-                                    style: GoogleFonts.lexend(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                  if (turn.timeLabel.isNotEmpty) ...[
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      turn.timeLabel,
-                                      style: GoogleFonts.lexend(
-                                        fontSize: 12,
-                                        color: Colors.black45,
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                turn.text,
-                                style: GoogleFonts.lexend(fontSize: 14),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    )
-                    .toList(),
-              ),
-            ),
-          ],
-          if (result.speakerInsights.isNotEmpty) ...[
-            const SizedBox(height: 14),
-            _ReviewSection(
-              title: 'Speaker roles and help signals',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: result.speakerInsights
-                    .map(
-                      (insight) => Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: insight.needsHelp
-                                ? const Color(0xFFFFF7ED)
-                                : Colors.white,
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                              color: insight.needsHelp
-                                  ? const Color(0xFFF3D8B4)
-                                  : const Color(0xFFE1ECE9),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '${insight.label} • ${insight.role}',
-                                style: GoogleFonts.lexend(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                insight.needsHelp
-                                    ? 'Needs help: ${insight.helpReason}'
-                                    : 'No help signal detected.',
-                                style: GoogleFonts.lexend(
-                                  fontSize: 13,
-                                  color: insight.needsHelp
-                                      ? const Color(0xFFAD6C1A)
-                                      : Colors.black54,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    )
-                    .toList(),
-              ),
-            ),
-          ],
-          if (result.paymentReason.isNotEmpty) ...[
-            const SizedBox(height: 14),
-            _ReviewSection(
-              title: 'Payment reason',
+              title: 'Request total',
               child: Text(
-                result.paymentReason,
-                style: GoogleFonts.lexend(fontSize: 15, color: Colors.black87),
+                '${result.currency} ${result.paymentAmount}',
+                style: GoogleFonts.lexend(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: const Color(0xFF00A697),
+                ),
+              ),
+            ),
+          ],
+          if (result.needsHuman) ...[
+            const SizedBox(height: 14),
+            _ReviewSection(
+              title: 'Human handoff',
+              child: Text(
+                result.handoffReason.isEmpty
+                    ? 'A real server is on the way to help complete the order.'
+                    : result.handoffReason,
+                style: GoogleFonts.lexend(
+                  fontSize: 15,
+                  color: const Color(0xFFAD4C2D),
+                ),
+              ),
+            ),
+          ],
+          if (result.hesitationDetected || result.turnLimitReached) ...[
+            const SizedBox(height: 14),
+            _ReviewSection(
+              title: 'Why the flow changed',
+              child: Text(
+                result.turnLimitReached
+                    ? 'The conversation passed the six-turn limit, so a real server is stepping in.'
+                    : 'The AI waiter detected uncertainty and switched to a real server for a smoother experience.',
+                style: GoogleFonts.lexend(fontSize: 14, color: Colors.black54),
               ),
             ),
           ],
@@ -1008,7 +1006,7 @@ class _VoiceOrderReview extends StatelessWidget {
               ),
             ),
           ],
-          if (result.contradictions.isNotEmpty) ...[
+          if (result.contradictions.isNotEmpty && !result.needsHuman) ...[
             const SizedBox(height: 14),
             _ReviewSection(
               title: 'Contradictions found',
@@ -1021,17 +1019,33 @@ class _VoiceOrderReview extends StatelessWidget {
               ),
             ),
           ],
-          const SizedBox(height: 14),
-          _ReviewSection(
-            title: result.needsConfirmation
-                ? 'Final confirmation needed'
-                : 'Suggested confirmation',
-            child: Text(
-              result.finalConfirmation,
-              style: GoogleFonts.lexend(fontSize: 15, color: Colors.black87),
-            ),
-          ),
         ],
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({required this.label, required this.color});
+
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: GoogleFonts.lexend(
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          color: color,
+        ),
       ),
     );
   }
@@ -1218,7 +1232,6 @@ class _BunqPaymentSheetState extends ConsumerState<BunqPaymentSheet> {
     await Future.delayed(const Duration(seconds: 2));
     if (mounted) {
       Navigator.pop(context);
-      ref.read(orderStatusProvider.notifier).state = 'paid';
     }
   }
 
@@ -1367,7 +1380,11 @@ class RestaurantAdminScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final orderStatus = ref.watch(orderStatusProvider);
+    final orders = ref.watch(tableOrdersProvider);
+    final humanOrders = orders.where((order) => order.requiresHuman).length;
+    final completedOrders = orders
+        .where((order) => order.status == 'completed')
+        .length;
 
     return Scaffold(
       appBar: AppBar(
@@ -1383,20 +1400,26 @@ class RestaurantAdminScreen extends ConsumerWidget {
           children: [
             Row(
               children: [
-                _StatCard(
-                  label: 'Requests Today',
-                  value: orderStatus == 'paid' ? '12' : '11',
-                ),
+                _StatCard(label: 'Open Tables', value: '${orders.length}'),
+                const SizedBox(width: 16),
+                _StatCard(label: 'Need Human', value: '$humanOrders'),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                _StatCard(label: 'Completed', value: '$completedOrders'),
                 const SizedBox(width: 16),
                 _StatCard(
-                  label: 'Volume',
-                  value: orderStatus == 'paid' ? 'EUR 284.50' : 'EUR 268.50',
+                  label: 'Ordering',
+                  value:
+                      '${orders.where((order) => order.status == 'ordering').length}',
                 ),
               ],
             ),
             const SizedBox(height: 32),
             Text(
-              'Recent Voice Requests',
+              'Incoming Tables',
               style: GoogleFonts.lexend(
                 fontSize: 20,
                 fontWeight: FontWeight.bold,
@@ -1404,32 +1427,21 @@ class RestaurantAdminScreen extends ConsumerWidget {
             ),
             const SizedBox(height: 16),
             Expanded(
-              child: ListView(
-                children: [
-                  if (orderStatus == 'paid')
-                    _OrderTile(
-                      table: 'Request 4',
-                      items:
-                          'Cafe purchase, EUR 11.50, approved from voice checkout',
-                      status: 'Paid',
-                      time: 'Just now',
-                      isNew: true,
+              child: orders.isEmpty
+                  ? Center(
+                      child: Text(
+                        'No active tables yet.',
+                        style: GoogleFonts.lexend(
+                          fontSize: 16,
+                          color: Colors.black54,
+                        ),
+                      ),
+                    )
+                  : ListView(
+                      children: orders
+                          .map((order) => _OrderTile(order: order))
+                          .toList(),
                     ),
-                  const _OrderTile(
-                    table: 'Request 1',
-                    items:
-                        'Market stall checkout, EUR 18.00, awaiting confirmation',
-                    status: 'Preparing',
-                    time: '5 mins ago',
-                  ),
-                  const _OrderTile(
-                    table: 'Request 7',
-                    items: 'Lunch tab, EUR 24.00, sent to customer',
-                    status: 'Ready',
-                    time: '12 mins ago',
-                  ),
-                ],
-              ),
             ),
           ],
         ),
@@ -1479,29 +1491,24 @@ class _StatCard extends StatelessWidget {
 }
 
 class _OrderTile extends StatelessWidget {
-  final String table;
-  final String items;
-  final String status;
-  final String time;
-  final bool isNew;
+  const _OrderTile({required this.order});
 
-  const _OrderTile({
-    required this.table,
-    required this.items,
-    required this.status,
-    required this.time,
-    this.isNew = false,
-  });
+  final TableOrder order;
 
   @override
   Widget build(BuildContext context) {
+    final items = order.items.isEmpty
+        ? 'Still taking the order'
+        : order.items.join(', ');
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: isNew ? Colors.teal.withOpacity(0.05) : Colors.white,
+        color: order.requiresHuman ? const Color(0xFFFFF4EF) : Colors.white,
         borderRadius: BorderRadius.circular(20),
-        border: isNew ? Border.all(color: Colors.teal.withOpacity(0.3)) : null,
+        border: order.requiresHuman
+            ? Border.all(color: const Color(0xFFF0C7B8))
+            : null,
         boxShadow: [
           BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10),
         ],
@@ -1517,7 +1524,7 @@ class _OrderTile extends StatelessWidget {
             ),
             child: Center(
               child: Text(
-                table.split(' ')[1],
+                '${order.tableNumber}',
                 style: GoogleFonts.lexend(
                   fontSize: 24,
                   fontWeight: FontWeight.bold,
@@ -1534,14 +1541,14 @@ class _OrderTile extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      table,
+                      order.label,
                       style: GoogleFonts.lexend(
                         fontSize: 18,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
                     Text(
-                      time,
+                      '${order.turnCount} turns',
                       style: GoogleFonts.lexend(
                         fontSize: 12,
                         color: Colors.grey,
@@ -1558,21 +1565,39 @@ class _OrderTile extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 8),
+                Text(
+                  order.summary,
+                  style: GoogleFonts.lexend(
+                    fontSize: 13,
+                    color: Colors.black54,
+                  ),
+                ),
+                if (order.handoffReason.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    order.handoffReason,
+                    style: GoogleFonts.lexend(
+                      fontSize: 13,
+                      color: const Color(0xFFAD4C2D),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 8),
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12,
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: _getStatusColor(status).withOpacity(0.1),
+                    color: _getStatusColor(order.status).withOpacity(0.1),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    status,
+                    order.status.replaceAll('_', ' '),
                     style: GoogleFonts.lexend(
                       fontSize: 12,
                       fontWeight: FontWeight.bold,
-                      color: _getStatusColor(status),
+                      color: _getStatusColor(order.status),
                     ),
                   ),
                 ),
@@ -1586,11 +1611,11 @@ class _OrderTile extends StatelessWidget {
 
   Color _getStatusColor(String status) {
     switch (status) {
-      case 'Paid':
+      case 'completed':
         return Colors.teal;
-      case 'Preparing':
-        return Colors.orange;
-      case 'Ready':
+      case 'needs_human':
+        return const Color(0xFFAD4C2D);
+      case 'ordering':
         return Colors.blue;
       default:
         return Colors.grey;
