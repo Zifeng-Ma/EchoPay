@@ -7,6 +7,7 @@ import 'dart:convert';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:logger/logger.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'supabase.dart';
 
@@ -102,6 +103,47 @@ class PaymentService {
 
     throw TimeoutException(
         'Payment confirmation timed out for order $orderId', timeout);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Direct OAuth Payment (Pay Now button)
+  // ---------------------------------------------------------------------------
+
+  /// Sends a direct bunq payment for [orderId] using the user's stored OAuth
+  /// token. The backend fetches the order total, restaurant alias, and user
+  /// OAuth token, calls bunq, and marks the order as confirmed.
+  ///
+  /// This is the "Pay Now" path triggered from the Orders screen. Unlike
+  /// [processPayment], it is synchronous — no polling required.
+  static Future<Map<String, dynamic>> payNow({required String orderId}) async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$_backendUrl/payment/pay'),
+            headers: {
+              'Content-Type': 'application/json',
+              if (token != null) 'Authorization': 'Bearer $token',
+            },
+            body: jsonEncode({'order_id': orderId}),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      if (response.statusCode != 200) {
+        throw Exception(
+            'Payment failed (${response.statusCode}): ${response.body}');
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      _logger.i('PaymentService.payNow: order $orderId confirmed — '
+          'payment_id=${data['payment_id']}');
+      return data;
+    } on TimeoutException {
+      rethrow;
+    } catch (e) {
+      _logger.e('PaymentService.payNow: $e');
+      rethrow;
+    }
   }
 
   // ---------------------------------------------------------------------------

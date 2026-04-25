@@ -42,6 +42,7 @@ class Settings:
 
     # --- Anthropic ---
     anthropic_api_key: str | None
+    anthropic_model: str
 
     # --- bunq ---
     bunq_api_key: str | None
@@ -74,6 +75,10 @@ class Settings:
         self.openai_tts_model = os.environ.get("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
         self.openai_tts_voice = os.environ.get("OPENAI_TTS_VOICE", "coral")
         self.anthropic_api_key = _optional("ANTHROPIC_API_KEY")
+        self.anthropic_model = os.environ.get(
+            "ANTHROPIC_MODEL",
+            "anthropic/claude-3-5-sonnet-20241022",
+        )
         self.bunq_api_key = _optional("BUNQ_API_KEY")
         self.bunq_use_sandbox = os.environ.get("BUNQ_USE_SANDBOX", "true").lower() == "true"
         self.bunq_oauth_client_id = _optional("BUNQ_OAUTH_CLIENT_ID")

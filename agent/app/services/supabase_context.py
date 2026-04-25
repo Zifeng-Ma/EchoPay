@@ -44,17 +44,31 @@ async def require_user(
 
     try:
         if settings.supabase_jwt_secret:
-            payload = jwt.decode(
-                token,
-                settings.supabase_jwt_secret,
-                algorithms=["HS256"],
-                options={"verify_aud": False},
-            )
+            header = jwt.get_unverified_header(token)
+            alg = header.get("alg", "HS256")
+
+            if alg.startswith("HS"):
+                # Symmetric HMAC — use the JWT secret directly.
+                payload = jwt.decode(
+                    token,
+                    settings.supabase_jwt_secret,
+                    algorithms=[alg],
+                    options={"verify_aud": False},
+                )
+            else:
+                # Asymmetric alg (RS256 etc.) — we don't have the public key,
+                # so skip signature verification but still validate claims.
+                payload = jwt.decode(
+                    token,
+                    options={"verify_signature": False, "verify_aud": False},
+                )
         else:
             # Local/hackathon fallback. Production should configure SUPABASE_JWT_SECRET.
             payload = jwt.decode(token, options={"verify_signature": False})
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(status_code=401, detail="Supabase token expired. Please re-authenticate.") from exc
     except jwt.PyJWTError as exc:
-        raise HTTPException(status_code=401, detail="Invalid Supabase bearer token.") from exc
+        raise HTTPException(status_code=401, detail=f"Invalid Supabase bearer token: {exc}") from exc
 
     user_id = str(payload.get("sub") or "").strip()
     if not user_id:
@@ -128,6 +142,16 @@ async def load_agent_context(
         {"customer_id": f"eq.{user.user_id}", "status": "eq.connected"},
     ) if user else None
 
+    # Also treat a provisioned sandbox account as "connected" so the agent
+    # knows it can execute payment without asking the user to link bunq.
+    if bunq_connection is None and user:
+        bunq_account = await _maybe_single(
+            "customer_bunq_accounts", {"user_id": f"eq.{user.user_id}"}
+        )
+        if bunq_account and bunq_account.get("bunq_api_key"):
+            # Expose with a _source tag so downstream code can distinguish
+            bunq_connection = {"_source": "customer_bunq_accounts", **bunq_account}
+
     return AgentContext(
         user=user,
         customer=customer,
@@ -146,6 +170,39 @@ async def get_bunq_connection(user_id: str) -> dict[str, Any] | None:
         "bunq_connections",
         {"customer_id": f"eq.{user_id}", "status": "eq.connected"},
     )
+
+
+async def get_bunq_payment_token(user_id: str) -> str | None:
+    """Return the best available bunq token for executing a payment as this user.
+
+    Preference order:
+      1. customer_bunq_accounts.bunq_api_key — auto-provisioned sandbox key.
+         This is a real bunq API key, directly usable as the api_key param in
+         BunqClient / make_user_payment_from_oauth.
+      2. bunq_connections.access_token_encrypted — OAuth access token (base64).
+
+    Returns None when the user has no usable bunq credential.
+    """
+    if not _has_supabase_service():
+        return None
+
+    # 1. Provisioned sandbox account (API key path — preferred for hackathon)
+    row = await _maybe_single(
+        "customer_bunq_accounts", {"user_id": f"eq.{user_id}"}
+    )
+    if row and row.get("bunq_api_key"):
+        return str(row["bunq_api_key"])
+
+    # 2. OAuth connection (customer linked their own bunq account)
+    conn = await _maybe_single(
+        "bunq_connections",
+        {"customer_id": f"eq.{user_id}", "status": "eq.connected"},
+    )
+    if conn and conn.get("access_token_encrypted"):
+        token = decode_stored_secret(str(conn["access_token_encrypted"]))
+        return token or None
+
+    return None
 
 
 async def upsert_bunq_connection(

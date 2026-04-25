@@ -66,6 +66,13 @@ class _AnalyticsTabState extends State<AnalyticsTab> {
   int get _avgOrderValue =>
       _orderCount == 0 ? 0 : (_totalRevenue / _orderCount).round();
 
+  /// Number of completed orders that were confirmed via bunq.
+  int get _bunqPaymentCount => _orders
+      .where((o) =>
+          (o['bunq_transaction_id'] as String?) != null &&
+          (o['bunq_transaction_id'] as String).isNotEmpty)
+      .length;
+
   /// Orders per hour-of-day (0–23).
   List<int> get _hourlyVolume {
     final counts = List<int>.filled(24, 0);
@@ -152,6 +159,7 @@ class _AnalyticsTabState extends State<AnalyticsTab> {
                             orderCount: _orderCount,
                             avgOrderValue: _avgOrderValue,
                             currency: _currency,
+                            bunqPaymentCount: _bunqPaymentCount,
                           ),
                           const SizedBox(height: 20),
                           _SectionHeader('Peak Ordering Hours'),
@@ -213,34 +221,51 @@ class _SummaryRow extends StatelessWidget {
   final int orderCount;
   final int avgOrderValue;
   final String currency;
+  final int bunqPaymentCount;
 
   const _SummaryRow({
     required this.totalRevenue,
     required this.orderCount,
     required this.avgOrderValue,
     required this.currency,
+    required this.bunqPaymentCount,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    return Column(
       children: [
-        Expanded(
-          child: _StatCard(
-            label: 'Revenue',
-            value: OrderService.formatPrice(totalRevenue, currency: currency),
-          ),
+        Row(
+          children: [
+            Expanded(
+              child: _StatCard(
+                label: 'Revenue',
+                value: OrderService.formatPrice(totalRevenue, currency: currency),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _StatCard(label: 'Orders', value: '$orderCount'),
+            ),
+          ],
         ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _StatCard(label: 'Orders', value: '$orderCount'),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _StatCard(
-            label: 'Avg Order',
-            value: OrderService.formatPrice(avgOrderValue, currency: currency),
-          ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: _StatCard(
+                label: 'Avg Order',
+                value: OrderService.formatPrice(avgOrderValue, currency: currency),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _StatCard(
+                label: 'Paid via bunq',
+                value: '$bunqPaymentCount',
+              ),
+            ),
+          ],
         ),
       ],
     );

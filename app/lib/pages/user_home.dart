@@ -443,33 +443,16 @@ class _UserHomePageState extends ConsumerState<UserHomePage> {
         cartItems: cart,
       );
       ref.read(activeOrderIdProvider.notifier).state = orderId;
+      ref.read(_paymentStatusProvider.notifier).state = 'Processing payment…';
 
-      final confirmed = await PaymentService.processPayment(
-        orderId: orderId,
-        amountCents: ref.read(cartProvider.notifier).totalCents,
-        currency: ctx.currency,
-        description: 'EchoPay – ${ctx.name}',
-        onStatusUpdate: (s) =>
-            ref.read(_paymentStatusProvider.notifier).state = switch (s) {
-              'initiating' => 'Opening payment request…',
-              'pending' => 'Waiting for bunq approval…',
-              'confirmed' => 'Payment confirmed!',
-              'cancelled' => 'Payment cancelled.',
-              _ => s,
-            },
-      );
+      await PaymentService.payNow(orderId: orderId);
 
       if (!mounted) return;
 
-      if (confirmed) {
-        ref.read(cartProvider.notifier).clearCart();
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const UserOrderPage()),
-        );
-      } else {
-        _showSnack('Payment was cancelled.');
-        ref.read(_phaseProvider.notifier).state = _Phase.active;
-      }
+      ref.read(cartProvider.notifier).clearCart();
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const UserOrderPage()),
+      );
     } catch (e) {
       if (!mounted) return;
       _showSnack('Payment error: $e');

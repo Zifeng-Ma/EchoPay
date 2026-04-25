@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../services/order.dart';
+import '../services/payment.dart';
 import '../services/provider.dart';
 import '../services/supabase.dart';
 
@@ -19,6 +20,7 @@ class UserOrderPage extends ConsumerStatefulWidget {
 class _UserOrderPageState extends ConsumerState<UserOrderPage> {
   List<Map<String, dynamic>> _history = [];
   bool _loading = true;
+  String? _payingOrderId;
   RealtimeChannel? _channel;
 
   @override
@@ -45,6 +47,22 @@ class _UserOrderPageState extends ConsumerState<UserOrderPage> {
       if (mounted) setState(() { _history = data; _loading = false; });
     } catch (_) {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _handlePayNow(String orderId) async {
+    setState(() => _payingOrderId = orderId);
+    try {
+      await PaymentService.payNow(orderId: orderId);
+      await _loadHistory();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Payment failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _payingOrderId = null);
     }
   }
 
@@ -81,7 +99,14 @@ class _UserOrderPageState extends ConsumerState<UserOrderPage> {
         children: [
           // Active order tracker
           if (activeOrderId != null && orderStatus != 'idle' && orderStatus != 'completed')
-            _OrderTracker(status: orderStatus, teal: teal),
+            _OrderTracker(
+              status: orderStatus,
+              teal: teal,
+              onPayNow: orderStatus == 'pending_payment' && _payingOrderId == null
+                  ? () => _handlePayNow(activeOrderId!)
+                  : null,
+              paying: _payingOrderId == activeOrderId,
+            ),
 
           // History
           Padding(
@@ -109,7 +134,14 @@ class _UserOrderPageState extends ConsumerState<UserOrderPage> {
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         itemCount: _history.length,
                         separatorBuilder: (context, index) => const SizedBox(height: 8),
-                        itemBuilder: (_, i) => _OrderHistoryCard(order: _history[i]),
+                        itemBuilder: (_, i) => _OrderHistoryCard(
+                          order: _history[i],
+                          onPayNow: _history[i]['order_status'] == 'pending_payment' &&
+                                  _payingOrderId == null
+                              ? () => _handlePayNow(_history[i]['id'] as String)
+                              : null,
+                          paying: _payingOrderId == _history[i]['id'],
+                        ),
                       ),
           ),
         ],
@@ -125,8 +157,15 @@ class _UserOrderPageState extends ConsumerState<UserOrderPage> {
 class _OrderTracker extends StatelessWidget {
   final String status;
   final Color teal;
+  final VoidCallback? onPayNow;
+  final bool paying;
 
-  const _OrderTracker({required this.status, required this.teal});
+  const _OrderTracker({
+    required this.status,
+    required this.teal,
+    this.onPayNow,
+    this.paying = false,
+  });
 
   static const _labels = {
     'draft': 'Order placed',
@@ -155,27 +194,44 @@ class _OrderTracker extends StatelessWidget {
         ),
         borderRadius: BorderRadius.circular(14),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!isCancelled)
-            SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor: AlwaysStoppedAnimation(teal),
+          Row(
+            children: [
+              if (isCancelled && !paying)
+                const Icon(Icons.cancel_outlined, size: 20, color: Colors.red)
+              else
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation(teal),
+                  ),
+                ),
+              const SizedBox(width: 12),
+              Text(
+                paying ? 'Processing payment…' : label,
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  color: isCancelled ? Colors.red : const Color(0xFF1A1A2E),
+                ),
               ),
-            )
-          else
-            const Icon(Icons.cancel_outlined, size: 20, color: Colors.red),
-          const SizedBox(width: 12),
-          Text(
-            label,
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: isCancelled ? Colors.red : const Color(0xFF1A1A2E),
-            ),
+            ],
           ),
+          if (status == 'pending_payment' && onPayNow != null && !paying)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: onPayNow,
+                  style: FilledButton.styleFrom(backgroundColor: teal),
+                  child: const Text('Pay Now'),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -188,8 +244,14 @@ class _OrderTracker extends StatelessWidget {
 
 class _OrderHistoryCard extends StatelessWidget {
   final Map<String, dynamic> order;
+  final VoidCallback? onPayNow;
+  final bool paying;
 
-  const _OrderHistoryCard({required this.order});
+  const _OrderHistoryCard({
+    required this.order,
+    this.onPayNow,
+    this.paying = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -262,6 +324,28 @@ class _OrderHistoryCard extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               _StatusChip(status: status),
+              if (status == 'pending_payment') ...[
+                const SizedBox(height: 8),
+                paying
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : TextButton(
+                        onPressed: onPayNow,
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 4),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        child: const Text(
+                          'Pay Now',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                      ),
+              ],
             ],
           ),
         ],

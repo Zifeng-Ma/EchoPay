@@ -210,9 +210,13 @@ def test_agent_turn_keeps_session_memory_for_context_answers(
         *,
         conversation_history,
         cart_context,
+        memory_state,
+        turn_analysis,
     ):
         seen_history_lengths.append(len(conversation_history))
         seen_history_texts.append([turn.text for turn in conversation_history])
+        assert memory_state.allergies == ["peanuts"] or memory_state.allergies == []
+        assert isinstance(turn_analysis, dict)
         return "Memory-aware reply."
 
     async def fake_speech(text: str):
@@ -249,3 +253,125 @@ def test_agent_turn_keeps_session_memory_for_context_answers(
         "I am allergic to peanuts.",
         "Memory-aware reply.",
     ]
+
+
+def test_agent_turn_returns_structured_memory_snapshot(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.routes import agent
+
+    async def fake_context_answer(
+        text,
+        context,
+        language,
+        *,
+        conversation_history,
+        cart_context,
+        memory_state,
+        turn_analysis,
+    ):
+        assert "peanuts" in memory_state.allergies
+        assert turn_analysis["memory_update"]["allergies"] == ["peanuts"]
+        return "I will keep peanut allergy in mind."
+
+    async def fake_speech(text: str):
+        return {}
+
+    monkeypatch.setattr(agent, "_generate_context_answer", fake_context_answer)
+    monkeypatch.setattr(agent, "_try_synthesize_speech", fake_speech)
+
+    token = jwt.encode({"sub": "user-structured-memory"}, "test", algorithm="HS256")
+    response = client.post(
+        "/agent/turn",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "text": "I am allergic to peanuts.",
+            "restaurant_id": "restaurant-1",
+            "session_id": "memory-session-2",
+            "menu_context": [
+                {"id": "latte-id", "name": "Latte", "price": 450},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["memory"]["allergies"] == ["peanuts"]
+    assert payload["turn_analysis"]["memory_update"]["allergies"] == ["peanuts"]
+    assert payload["message"] == "I will keep peanut allergy in mind."
+
+
+def test_agent_turn_introduces_menu_by_category(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.routes import agent
+
+    async def fake_speech(text: str):
+        return {}
+
+    monkeypatch.setattr(agent, "_try_synthesize_speech", fake_speech)
+
+    token = jwt.encode({"sub": "user-menu-intro"}, "test", algorithm="HS256")
+    response = client.post(
+        "/agent/turn",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "text": "Introduce the menu",
+            "restaurant_id": "restaurant-1",
+            "session_id": "menu-session-1",
+            "menu_context": [
+                {"id": "soup-id", "name": "Tomato Soup", "category": "Starters", "price": 650},
+                {"id": "steak-id", "name": "Steak Frites", "category": "Mains", "price": 2250},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "First, Starters" in payload["agent_response"]
+    assert "Tomato Soup" in payload["agent_response"]
+    assert "Steak Frites" not in payload["agent_response"]
+    assert "Shall I continue with Mains?" in payload["agent_response"]
+
+
+def test_agent_turn_continues_menu_introduction(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.routes import agent
+
+    async def fake_speech(text: str):
+        return {}
+
+    monkeypatch.setattr(agent, "_try_synthesize_speech", fake_speech)
+
+    token = jwt.encode({"sub": "user-menu-continue"}, "test", algorithm="HS256")
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {
+        "restaurant_id": "restaurant-1",
+        "session_id": "menu-session-2",
+        "menu_context": [
+            {"id": "soup-id", "name": "Tomato Soup", "category": "Starters", "price": 650},
+            {"id": "steak-id", "name": "Steak Frites", "category": "Mains", "price": 2250},
+        ],
+    }
+
+    client.post(
+        "/agent/turn",
+        headers=headers,
+        json={**body, "text": "Walk me through the menu"},
+    )
+    response = client.post(
+        "/agent/turn",
+        headers=headers,
+        json={**body, "text": "continue"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "Next is Mains" in payload["agent_response"]
+    assert "Steak Frites" in payload["agent_response"]
+    assert "Tomato Soup" not in payload["agent_response"]
+    assert "That is the last category" in payload["agent_response"]
