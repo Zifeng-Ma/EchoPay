@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="#features">Features</a> &middot;
+  <a href="#screenshots">Screenshots</a> &middot;
   <a href="#architecture">Architecture</a> &middot;
   <a href="#tech-stack">Tech Stack</a> &middot;
   <a href="#getting-started">Getting Started</a> &middot;
@@ -18,6 +19,34 @@
 EchoPay replaces the cashier and waiter at quick-service and casual restaurants with an intelligent voice agent. Customers scan a QR code at a table or counter, speak to the agent in their own language, and the agent — grounded in that restaurant's menu, inventory, and hours — answers questions, recommends dishes, and places the order. Payment is settled automatically through the bunq API upon customer approval.
 
 Restaurants save labor costs and eliminate queues. Customers get instant multilingual service and an agent that remembers their preferences across visits.
+
+## Screenshots
+
+<p align="center">
+  <img src="Images/login.PNG" alt="Login Screen" width="200"/>
+  &nbsp;&nbsp;
+  <img src="Images/googleauth.PNG" alt="Google Authentication" width="200"/>
+  &nbsp;&nbsp;
+  <img src="Images/servant.PNG" alt="Voice Ordering Agent" width="200"/>
+</p>
+
+<p align="center">
+  <em>Sign in with email or Google &nbsp;&bull;&nbsp; AI voice agent takes your order</em>
+</p>
+
+<br/>
+
+<p align="center">
+  <img src="Images/menu_management.PNG" alt="Menu Management" width="200"/>
+  &nbsp;&nbsp;
+  <img src="Images/create_qr_code.PNG" alt="QR Code Management" width="200"/>
+  &nbsp;&nbsp;
+  <img src="Images/analysis.PNG" alt="Analytics Dashboard" width="200"/>
+</p>
+
+<p align="center">
+  <em>Menu management &nbsp;&bull;&nbsp; QR code generation &nbsp;&bull;&nbsp; Analytics dashboard</em>
+</p>
 
 ## Features
 
