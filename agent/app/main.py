@@ -3,7 +3,7 @@ EchoPay Agent — FastAPI application entry point.
 
 Boot with:
     cd agent
-    uvicorn app.main:app --reload --port 8000
+    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 Health check:
     curl http://localhost:8000/health
@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # If any required var is missing, the process exits with a descriptive error
 # before uvicorn starts accepting traffic. Intentional.
 from app.config import settings  # noqa: F401
-from app.routes import health
+from app.routes import agent, health, payments, voice
 
 app = FastAPI(
     title="EchoPay Agent",
@@ -35,3 +35,7 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(agent.router)
+app.include_router(voice.router)
+app.include_router(payments.router)
+app.include_router(payments.compat_router)

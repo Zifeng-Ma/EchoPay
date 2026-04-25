@@ -66,5 +66,22 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>EchoPay uses the camera to scan the table QR code.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>EchoPay uses the microphone to take your voice order.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+	<dict>
+		<key>CFBundleTypeRole</key>
+		<string>Editor</string>
+		<key>CFBundleURLSchemes</key>
+		<array>
+		<!-- TODO Replace this value: -->
+		<!-- Copied from GoogleService-Info.plist key REVERSED_CLIENT_ID -->
+		<string>com.googleusercontent.apps.867827570051-us6gnrrm4kdjp1l1jp5daop1hjj3pelj</string>
+		</array>
+	</dict>
+	</array>
 </dict>
 </plist>
