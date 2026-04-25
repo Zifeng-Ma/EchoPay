@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 
@@ -123,3 +124,128 @@ def test_agent_text_returns_compat_agent_response(client: TestClient):
     assert payload["intents"][0]["action"] == "add_item"
     assert payload["intents"][0]["menu_item_id"] == "latte-id"
     assert payload["intents"][0]["quantity"] == 2
+
+
+def test_agent_turn_requires_confirmation_before_cart_intents(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.routes import agent
+
+    async def fake_speech(text: str):
+        return {}
+
+    monkeypatch.setattr(agent, "_try_synthesize_speech", fake_speech)
+
+    token = jwt.encode({"sub": "user-1"}, "test", algorithm="HS256")
+    response = client.post(
+        "/agent/turn",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "text": "Two lattes",
+            "restaurant_id": "restaurant-1",
+            "session_id": "session-1",
+            "menu_context": [
+                {"id": "latte-id", "name": "Latte", "price": 450},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requires_confirmation"] is True
+    assert payload["cart_intents"] == []
+    assert payload["pending_action"]["cart_intents"][0]["quantity"] == 2
+
+
+def test_agent_turn_confirmation_emits_pending_cart_intents(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.routes import agent
+
+    async def fake_speech(text: str):
+        return {}
+
+    monkeypatch.setattr(agent, "_try_synthesize_speech", fake_speech)
+
+    token = jwt.encode({"sub": "user-1"}, "test", algorithm="HS256")
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {
+        "text": "Two lattes",
+        "restaurant_id": "restaurant-1",
+        "session_id": "session-2",
+        "menu_context": [
+            {"id": "latte-id", "name": "Latte", "price": 450},
+        ],
+    }
+
+    client.post("/agent/turn", headers=headers, json=body)
+    response = client.post(
+        "/agent/turn",
+        headers=headers,
+        json={**body, "text": "confirm", "confirm_action": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requires_confirmation"] is False
+    assert payload["cart_intents"][0]["menu_item_id"] == "latte-id"
+    assert payload["action_result"] == {"status": "completed", "type": "cart"}
+
+
+def test_agent_turn_keeps_session_memory_for_context_answers(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.routes import agent
+
+    seen_history_lengths = []
+    seen_history_texts = []
+
+    async def fake_context_answer(
+        text,
+        context,
+        language,
+        *,
+        conversation_history,
+        cart_context,
+    ):
+        seen_history_lengths.append(len(conversation_history))
+        seen_history_texts.append([turn.text for turn in conversation_history])
+        return "Memory-aware reply."
+
+    async def fake_speech(text: str):
+        return {}
+
+    monkeypatch.setattr(agent, "_generate_context_answer", fake_context_answer)
+    monkeypatch.setattr(agent, "_try_synthesize_speech", fake_speech)
+
+    token = jwt.encode({"sub": "user-memory"}, "test", algorithm="HS256")
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {
+        "restaurant_id": "restaurant-1",
+        "session_id": "memory-session-1",
+        "menu_context": [
+            {"id": "latte-id", "name": "Latte", "price": 450},
+        ],
+    }
+
+    first = client.post(
+        "/agent/turn",
+        headers=headers,
+        json={**body, "text": "I am allergic to peanuts."},
+    )
+    second = client.post(
+        "/agent/turn",
+        headers=headers,
+        json={**body, "text": "What can I safely order?"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert seen_history_lengths == [0, 2]
+    assert seen_history_texts[1] == [
+        "I am allergic to peanuts.",
+        "Memory-aware reply.",
+    ]

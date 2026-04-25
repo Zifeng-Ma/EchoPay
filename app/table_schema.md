@@ -28,11 +28,29 @@ CREATE TABLE restaurants (
   opening_hours JSONB,          -- Flexible JSON for opening times, e.g., {"monday": "09:00-22:00"}
   default_language VARCHAR(5) DEFAULT 'en', -- The primary language for the restaurant
   currency VARCHAR(3) DEFAULT 'EUR',      -- Currency code, e.g., EUR, USD
+  bunq_recipient_alias TEXT,    -- Merchant payment destination, e.g., sugardaddy@bunq.com in sandbox
+  bunq_recipient_alias_type TEXT DEFAULT 'EMAIL', -- bunq pointer type: EMAIL, PHONE_NUMBER, IBAN
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 COMMENT ON TABLE restaurants IS 'Holds all configuration data for a single restaurant.';
+
+
+-- =====================================================================
+-- 2b. BUNQ CONNECTIONS
+-- Links an EchoPay customer account to a bunq account authorized by OAuth.
+-- =====================================================================
+CREATE TABLE bunq_connections (
+  customer_id UUID PRIMARY KEY REFERENCES customers(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'connected',
+  bunq_user_id TEXT,
+  access_token_encrypted TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+COMMENT ON TABLE bunq_connections IS 'Stores backend-only bunq OAuth connection metadata for customer-authorized payments.';
 
 
 -- =====================================================================

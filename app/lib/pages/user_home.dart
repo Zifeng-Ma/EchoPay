@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -12,7 +14,6 @@ import '../services/payment.dart';
 import '../services/provider.dart';
 import '../services/restaurant.dart';
 import '../services/voice_agent_tts_service.dart';
-import '../services/voice_order_service.dart';
 import 'landing.dart';
 import 'user_order.dart';
 
@@ -28,6 +29,7 @@ enum _VoiceState { idle, recording, processing }
 
 final _phaseProvider = StateProvider<_Phase>((ref) => _Phase.idle);
 final _agentMessageProvider = StateProvider<String?>((ref) => null);
+final _agentPendingConfirmationProvider = StateProvider<bool>((ref) => false);
 final _voiceStateProvider = StateProvider<_VoiceState>(
   (ref) => _VoiceState.idle,
 );
@@ -37,11 +39,6 @@ final _latestVoiceDraftProvider = StateProvider<VoiceOrderResult?>(
 );
 final _conversationContextProvider = StateProvider<String>((ref) => '');
 final _voiceTurnCountProvider = StateProvider<int>((ref) => 0);
-final _voiceOrderServiceProvider = Provider<VoiceOrderService>((ref) {
-  final service = VoiceOrderService();
-  ref.onDispose(service.dispose);
-  return service;
-});
 final _voiceAgentTtsServiceProvider = Provider<VoiceAgentTtsService>((ref) {
   final service = VoiceAgentTtsService();
   ref.onDispose(service.dispose);
@@ -104,17 +101,28 @@ class UserHomePage extends ConsumerStatefulWidget {
 }
 
 class _UserHomePageState extends ConsumerState<UserHomePage> {
+  static const _silenceAutoStopDelay = Duration(seconds: 4);
+  static const _amplitudeSampleInterval = Duration(milliseconds: 250);
+  static const _speechAmplitudeThresholdDb = -45.0;
+
   late final AudioRecorder _recorder;
+  late final TextEditingController _agentTextController;
+  StreamSubscription<Amplitude>? _amplitudeSubscription;
+  Timer? _silenceTimer;
+  bool _isStoppingRecording = false;
 
   @override
   void initState() {
     super.initState();
     _recorder = AudioRecorder();
+    _agentTextController = TextEditingController();
   }
 
   @override
   void dispose() {
+    _cancelSilenceDetection();
     _recorder.dispose();
+    _agentTextController.dispose();
     super.dispose();
   }
 
@@ -144,6 +152,7 @@ class _UserHomePageState extends ConsumerState<UserHomePage> {
       ref.read(_latestVoiceDraftProvider.notifier).state = null;
       ref.read(_conversationContextProvider.notifier).state = '';
       ref.read(_voiceTurnCountProvider.notifier).state = 0;
+      ref.read(_agentPendingConfirmationProvider.notifier).state = false;
       ref.read(_phaseProvider.notifier).state = _Phase.active;
     } catch (e) {
       _showSnack('Failed to load menu: $e');
@@ -155,6 +164,7 @@ class _UserHomePageState extends ConsumerState<UserHomePage> {
   // Leave store → reset everything
   // -------------------------------------------------------------------------
   void _leaveStore() {
+    _cancelSilenceDetection();
     ref.read(restaurantContextProvider.notifier).state = null;
     ref.read(menuItemsProvider.notifier).state = [];
     ref.read(cartProvider.notifier).clearCart();
@@ -163,6 +173,7 @@ class _UserHomePageState extends ConsumerState<UserHomePage> {
     ref.read(_latestVoiceDraftProvider.notifier).state = null;
     ref.read(_conversationContextProvider.notifier).state = '';
     ref.read(_voiceTurnCountProvider.notifier).state = 0;
+    ref.read(_agentPendingConfirmationProvider.notifier).state = false;
     ref.read(_voiceStateProvider.notifier).state = _VoiceState.idle;
     ref.read(orderStatusProvider.notifier).state = 'idle';
     ref.read(activeOrderIdProvider.notifier).state = null;
@@ -207,13 +218,19 @@ class _UserHomePageState extends ConsumerState<UserHomePage> {
       path: path,
     );
 
+    _startSilenceDetection();
     ref.read(_voiceStateProvider.notifier).state = _VoiceState.recording;
   }
 
   Future<void> _stopAndProcess() async {
+    if (_isStoppingRecording) return;
+    _isStoppingRecording = true;
+    _cancelSilenceDetection();
+
     final path = await _recorder.stop();
     if (path == null) {
       ref.read(_voiceStateProvider.notifier).state = _VoiceState.idle;
+      _isStoppingRecording = false;
       _showSnack('Recording failed — no audio captured.');
       return;
     }
@@ -225,35 +242,55 @@ class _UserHomePageState extends ConsumerState<UserHomePage> {
       final ctx = ref.read(restaurantContextProvider);
       if (ctx == null) return;
 
-      final turnCount = ref.read(_voiceTurnCountProvider) + 1;
-      final draft = await ref
-          .read(_voiceOrderServiceProvider)
-          .analyzeRecordingFile(
-            recordingPath: path,
-            conversationContext: ref.read(_conversationContextProvider),
-            language: ctx.defaultLanguage,
-            turnCount: turnCount,
-          );
-      final text = draft.transcript.trim();
-
-      _storeVoiceDraft(text: text, draft: draft, turnCount: turnCount);
-      await _playAgentAudio(draft);
-
-      if (text.isEmpty) {
-        _showSnack('Couldn\'t hear anything. Try again.');
-        return;
-      }
-
-      await _dispatchText(text, analyzedDraft: draft);
+      final response = await AgentService.sendRecordingFile(
+        recordingPath: path,
+        restaurantId: ctx.restaurantId,
+        qrLocationId: ctx.qrLocationId,
+        sessionId: ref.read(_sessionIdProvider),
+        menuItems: ref.read(menuItemsProvider),
+        cartItems: ref.read(cartProvider),
+        language: ctx.defaultLanguage,
+        confirmAction: ref.read(_agentPendingConfirmationProvider),
+      );
+      await _handleAgentResponse(response);
     } catch (e) {
       _showSnack('Voice agent failed: $e');
     } finally {
       ref.read(_voiceStateProvider.notifier).state = _VoiceState.idle;
+      _isStoppingRecording = false;
     }
   }
 
-  Future<void> _playAgentAudio(VoiceOrderResult draft) async {
-    if (draft.agentAudioBase64.trim().isEmpty) {
+  void _startSilenceDetection() {
+    _cancelSilenceDetection();
+    _scheduleAutoStopAfterSilence();
+    _amplitudeSubscription = _recorder
+        .onAmplitudeChanged(_amplitudeSampleInterval)
+        .listen((amplitude) {
+          if (amplitude.current > _speechAmplitudeThresholdDb) {
+            _scheduleAutoStopAfterSilence();
+          }
+        });
+  }
+
+  void _scheduleAutoStopAfterSilence() {
+    _silenceTimer?.cancel();
+    _silenceTimer = Timer(_silenceAutoStopDelay, () {
+      if (!mounted) return;
+      if (ref.read(_voiceStateProvider) != _VoiceState.recording) return;
+      unawaited(_stopAndProcess());
+    });
+  }
+
+  void _cancelSilenceDetection() {
+    _silenceTimer?.cancel();
+    _silenceTimer = null;
+    _amplitudeSubscription?.cancel();
+    _amplitudeSubscription = null;
+  }
+
+  Future<void> _playAgentResponseAudio(AgentResponse response) async {
+    if (response.agentAudioBase64.trim().isEmpty) {
       return;
     }
 
@@ -261,118 +298,106 @@ class _UserHomePageState extends ConsumerState<UserHomePage> {
       await ref
           .read(_voiceAgentTtsServiceProvider)
           .playBase64(
-            audioBase64: draft.agentAudioBase64,
-            contentType: draft.agentAudioContentType,
+            audioBase64: response.agentAudioBase64,
+            contentType: response.agentAudioContentType,
           );
     } catch (_) {
       // The visible agent response is still shown when audio playback fails.
     }
   }
 
-  Future<void> _dispatchText(
-    String text, {
-    VoiceOrderResult? analyzedDraft,
-  }) async {
+  Future<void> _onSendText() async {
+    if (ref.read(_voiceStateProvider) == _VoiceState.processing) return;
+
+    final text = _agentTextController.text.trim();
+    if (text.isEmpty) return;
+
+    _agentTextController.clear();
+    ref.read(_voiceStateProvider.notifier).state = _VoiceState.processing;
+
+    try {
+      await _dispatchText(
+        text,
+        confirmAction: ref.read(_agentPendingConfirmationProvider),
+      );
+    } finally {
+      ref.read(_voiceStateProvider.notifier).state = _VoiceState.idle;
+    }
+  }
+
+  Future<void> _dispatchText(String text, {bool confirmAction = false}) async {
     final ctx = ref.read(restaurantContextProvider);
     if (ctx == null) return;
-
-    final draft = analyzedDraft ?? await _analyzeVoiceDraft(text);
 
     try {
       final response = await AgentService.sendText(
         text: text,
         restaurantId: ctx.restaurantId,
+        qrLocationId: ctx.qrLocationId,
         sessionId: ref.read(_sessionIdProvider),
         menuItems: ref.read(menuItemsProvider),
+        cartItems: ref.read(cartProvider),
         language: ctx.defaultLanguage,
+        confirmAction: confirmAction,
       );
 
-      final hasDraftMessage =
-          ref.read(_agentMessageProvider)?.trim().isNotEmpty ?? false;
-      if (!hasDraftMessage && response.message.trim().isNotEmpty) {
-        ref.read(_agentMessageProvider.notifier).state = response.message;
-      }
+      await _handleAgentResponse(response);
+    } catch (e) {
+      ref.read(_agentMessageProvider.notifier).state =
+          'Sorry, I heard you but could not process that: $e';
+    }
+  }
+
+  Future<void> _handleAgentResponse(AgentResponse response) async {
+    if (response.message.trim().isNotEmpty) {
+      ref.read(_agentMessageProvider.notifier).state = response.message;
+    }
+    await _playAgentResponseAudio(response);
+
+    if (response.requiresConfirmation) {
+      ref.read(_agentPendingConfirmationProvider.notifier).state = true;
+      return;
+    }
+
+    ref.read(_agentPendingConfirmationProvider.notifier).state = false;
+
+    if (response.intents.isNotEmpty) {
       AgentService.applyIntents(
         ref.read(cartProvider.notifier),
         response.intents,
         ref.read(menuItemsProvider),
       );
-
-      if (response.triggerCheckout) {
-        if (voiceDraftBlocksCheckout(draft)) {
-          _showVoiceHandoff(draft!);
-        } else if (ref.read(cartProvider).isNotEmpty) {
-          ref.read(_phaseProvider.notifier).state = _Phase.checkoutConfirm;
-        }
-      }
-    } catch (e) {
-      if (draft == null) {
-        ref.read(_agentMessageProvider.notifier).state =
-            'Sorry, I heard you but could not process the order: $e';
-      }
     }
-  }
 
-  Future<VoiceOrderResult?> _analyzeVoiceDraft(String text) async {
-    final turnCount = ref.read(_voiceTurnCountProvider) + 1;
-
-    try {
-      final draft = await ref
-          .read(_voiceOrderServiceProvider)
-          .analyzeTranscript(
-            transcript: text,
-            conversationContext: ref.read(_conversationContextProvider),
-            turnCount: turnCount,
-          );
-
-      _storeVoiceDraft(text: text, draft: draft, turnCount: turnCount);
-
-      return draft;
-    } catch (_) {
-      return null;
+    final actionStatus = response.actionResult?['status'] as String?;
+    if (actionStatus == 'needs_bunq_connection') {
+      _showSnack('Connect bunq before starting payment.');
+      return;
     }
-  }
-
-  void _storeVoiceDraft({
-    required String text,
-    required VoiceOrderResult draft,
-    required int turnCount,
-  }) {
-    ref.read(_latestVoiceDraftProvider.notifier).state = draft;
-    ref.read(_voiceTurnCountProvider.notifier).state = turnCount;
-    ref
-        .read(_conversationContextProvider.notifier)
-        .state = _buildConversationContext(
-      priorContext: ref.read(_conversationContextProvider),
-      transcript: text,
-      draft: draft,
-    );
-
-    final message = voiceDraftDisplayMessage(draft);
-    if (message != null) {
-      ref.read(_agentMessageProvider.notifier).state = message;
+    if (actionStatus == 'needs_payment_destination') {
+      _showSnack('This restaurant needs a bunq payment destination first.');
+      return;
     }
-  }
-
-  String _buildConversationContext({
-    required String priorContext,
-    required String transcript,
-    required VoiceOrderResult draft,
-  }) {
-    final nextLines = <String>[
-      if (priorContext.trim().isNotEmpty) priorContext.trim(),
-      'Customer: ${transcript.trim()}',
-      if (draft.shortSummary.trim().isNotEmpty)
-        'Draft: ${draft.shortSummary.trim()}',
-      if (draft.finalConfirmation.trim().isNotEmpty)
-        'Agent: ${draft.finalConfirmation.trim()}',
-    ];
-    final combined = nextLines.join('\n');
-    const maxLength = 1800;
-    if (combined.length <= maxLength) {
-      return combined;
+    if (response.orderId != null && response.orderId!.isNotEmpty) {
+      ref.read(activeOrderIdProvider.notifier).state = response.orderId;
     }
-    return combined.substring(combined.length - maxLength);
+    if (response.paymentStatus == 'confirmed') {
+      ref.read(cartProvider.notifier).clearCart();
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const UserOrderPage()),
+      );
+      return;
+    }
+    if (response.paymentStatus == 'pending_payment') {
+      ref.read(_phaseProvider.notifier).state = _Phase.payment;
+      ref.read(_paymentStatusProvider.notifier).state =
+          'Waiting for bunq approval…';
+      return;
+    }
+    if (response.triggerCheckout && ref.read(cartProvider).isNotEmpty) {
+      ref.read(_phaseProvider.notifier).state = _Phase.checkoutConfirm;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -495,8 +520,10 @@ class _UserHomePageState extends ConsumerState<UserHomePage> {
           : _buildAppBar(phase, ctx, theme, teal),
       body: _buildBody(phase, teal, theme),
       bottomNavigationBar: phase == _Phase.active
-          ? _VoiceBar(
-              onTap: _onMicTap,
+          ? _AgentComposer(
+              controller: _agentTextController,
+              onSend: _onSendText,
+              onMicTap: _onMicTap,
               voiceState: ref.watch(_voiceStateProvider),
               teal: teal,
             )
@@ -691,32 +718,40 @@ class _ActiveView extends ConsumerWidget {
     final totalCents = ref.read(cartProvider.notifier).totalCents;
     final itemCount = cart.fold(0, (s, i) => s + i.quantity);
 
-    return Column(
-      children: [
-        // Agent message bubble
-        if (agentMsg != null)
-          _AgentBubble(
+    final agentBubble = agentMsg == null
+        ? null
+        : _AgentBubble(
             message: agentMsg,
             onDismiss: () =>
                 ref.read(_agentMessageProvider.notifier).state = null,
-          ),
+          );
 
-        // Menu list
+    return Column(
+      children: [
         Expanded(
           child: menuItems.isEmpty
-              ? const Center(child: Text('No menu items available.'))
+              ? ListView(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  children: [
+                    ?agentBubble,
+                    const SizedBox(height: 160),
+                    const Center(child: Text('No menu items available.')),
+                  ],
+                )
               : ListView.builder(
                   padding: const EdgeInsets.only(bottom: 8),
-                  itemCount: grouped.length,
+                  itemCount: grouped.length + (agentBubble == null ? 0 : 1),
                   itemBuilder: (_, i) {
-                    final category = grouped.keys.elementAt(i);
+                    if (agentBubble != null && i == 0) return agentBubble;
+
+                    final categoryIndex = agentBubble == null ? i : i - 1;
+                    final category = grouped.keys.elementAt(categoryIndex);
                     final items = grouped[category]!;
                     return _CategorySection(category: category, items: items);
                   },
                 ),
         ),
 
-        // Cart summary strip
         if (itemCount > 0)
           _CartStrip(
             itemCount: itemCount,
@@ -1022,72 +1057,123 @@ class _CartStrip extends StatelessWidget {
 }
 
 // ===========================================================================
-// Voice bar — bottom mic button
+// Agent composer — bottom text input + mic button
 // ===========================================================================
 
-class _VoiceBar extends StatelessWidget {
-  final VoidCallback onTap;
+class _AgentComposer extends StatelessWidget {
+  final TextEditingController controller;
+  final VoidCallback onSend;
+  final VoidCallback onMicTap;
   final _VoiceState voiceState;
   final Color teal;
 
-  const _VoiceBar({
-    required this.onTap,
+  const _AgentComposer({
+    required this.controller,
+    required this.onSend,
+    required this.onMicTap,
     required this.voiceState,
     required this.teal,
   });
 
   @override
   Widget build(BuildContext context) {
-    final (color, icon, label) = switch (voiceState) {
-      _VoiceState.idle => (teal, Icons.mic_rounded, 'Tap to speak'),
-      _VoiceState.recording => (
-        Colors.red,
-        Icons.stop_circle_outlined,
-        'Tap to send',
-      ),
-      _VoiceState.processing => (
-        Colors.grey,
-        Icons.hourglass_top_rounded,
-        'Processing…',
-      ),
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final (color, icon) = switch (voiceState) {
+      _VoiceState.idle => (teal, Icons.mic_rounded),
+      _VoiceState.recording => (Colors.red, Icons.stop_circle_outlined),
+      _VoiceState.processing => (Colors.grey, Icons.hourglass_top_rounded),
     };
 
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            GestureDetector(
-              onTap: voiceState == _VoiceState.processing ? null : onTap,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                width: 64,
-                height: 64,
-                decoration: BoxDecoration(
-                  color: color,
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(
-                      color: color.withAlpha(80),
-                      blurRadius: 16,
-                      spreadRadius: voiceState == _VoiceState.recording ? 6 : 4,
-                    ),
-                  ],
+    return AnimatedPadding(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+      padding: EdgeInsets.only(bottom: keyboardInset),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: Container(
+                  height: 52,
+                  padding: const EdgeInsets.only(left: 16, right: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[100],
+                    borderRadius: BorderRadius.circular(26),
+                    border: Border.all(color: Colors.grey[300]!),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: controller,
+                          minLines: 1,
+                          maxLines: 3,
+                          textInputAction: TextInputAction.send,
+                          onSubmitted: voiceState == _VoiceState.processing
+                              ? null
+                              : (_) => onSend(),
+                          decoration: const InputDecoration(
+                            hintText: 'Ask or order…',
+                            border: InputBorder.none,
+                            isDense: true,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Send',
+                        onPressed: voiceState == _VoiceState.processing
+                            ? null
+                            : onSend,
+                        icon: Icon(
+                          Icons.send_rounded,
+                          color: voiceState == _VoiceState.processing
+                              ? Colors.grey
+                              : teal,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-                child: Icon(icon, color: Colors.white, size: 30),
               ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey[500],
-                fontWeight: FontWeight.w500,
+              const SizedBox(width: 10),
+              Semantics(
+                button: true,
+                label: voiceState == _VoiceState.recording
+                    ? 'Stop recording'
+                    : voiceState == _VoiceState.processing
+                    ? 'Processing'
+                    : 'Start recording',
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: color.withAlpha(80),
+                        blurRadius: 16,
+                        spreadRadius: voiceState == _VoiceState.recording
+                            ? 5
+                            : 2,
+                      ),
+                    ],
+                  ),
+                  child: IconButton(
+                    tooltip: voiceState == _VoiceState.recording
+                        ? 'Stop and send'
+                        : 'Speak',
+                    onPressed: voiceState == _VoiceState.processing
+                        ? null
+                        : onMicTap,
+                    icon: Icon(icon, color: Colors.white, size: 28),
+                  ),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

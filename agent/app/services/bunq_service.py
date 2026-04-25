@@ -114,6 +114,47 @@ def make_payment(
     return {"payment_id": resp[0]["Id"]["id"]}
 
 
+def make_user_payment_from_oauth(
+    *,
+    oauth_access_token: str,
+    amount_cents: int,
+    currency: str,
+    recipient_alias: str,
+    recipient_alias_type: str,
+    description: str,
+) -> dict:
+    """
+    Send a payment from a bunq user who connected through OAuth.
+
+    The OAuth access token is used like a user API key to create a session, as
+    described in the bunq OAuth flow.
+    """
+    if BunqClient is None:
+        raise RuntimeError(
+            "bunq_client is not available — add the repo-level bunq client "
+            "module before using payment routes."
+        )
+    if not oauth_access_token:
+        raise RuntimeError("Missing bunq OAuth access token.")
+
+    c = BunqClient(api_key=oauth_access_token, sandbox=settings.bunq_use_sandbox)
+    c.authenticate()
+    account_id = c.get_primary_account_id()
+    resp = c.post(
+        f"user/{c.user_id}/monetary-account/{account_id}/payment",
+        {
+            "amount": {"value": _fmt(amount_cents), "currency": currency},
+            "counterparty_alias": {
+                "type": recipient_alias_type,
+                "value": recipient_alias,
+                "name": recipient_alias,
+            },
+            "description": description,
+        },
+    )
+    return {"payment_id": resp[0]["Id"]["id"]}
+
+
 def get_request_status(request_id: int) -> dict:
     """Poll a RequestInquiry. Status: PENDING|ACCEPTED|REJECTED|REVOKED|EXPIRED."""
     c, acc = _get_client()

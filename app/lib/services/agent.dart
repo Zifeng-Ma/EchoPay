@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import 'package:logger/logger.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'backend_config.dart';
 import 'provider.dart';
@@ -85,22 +86,54 @@ class AgentResponse {
 
   /// When true, the agent is signalling that the customer is ready to pay.
   final bool triggerCheckout;
+  final bool requiresConfirmation;
+  final String agentAudioBase64;
+  final String agentAudioContentType;
+  final Map<String, dynamic>? pendingAction;
+  final Map<String, dynamic>? actionResult;
+  final String? orderId;
+  final String? paymentStatus;
 
   const AgentResponse({
     required this.message,
     required this.intents,
     this.triggerCheckout = false,
+    this.requiresConfirmation = false,
+    this.agentAudioBase64 = '',
+    this.agentAudioContentType = 'audio/wav',
+    this.pendingAction,
+    this.actionResult,
+    this.orderId,
+    this.paymentStatus,
   });
 
   factory AgentResponse.fromJson(Map<String, dynamic> json) {
-    final rawIntents = (json['intents'] as List<dynamic>?) ?? [];
+    final rawIntents =
+        (json['cart_intents'] as List<dynamic>?) ??
+        (json['intents'] as List<dynamic>?) ??
+        [];
     return AgentResponse(
-      message: (json['message'] as String?) ?? '',
+      message:
+          (json['message'] as String?) ??
+          (json['agent_response'] as String?) ??
+          '',
       intents: rawIntents
           .cast<Map<String, dynamic>>()
           .map(AgentItemIntent.fromJson)
           .toList(),
       triggerCheckout: (json['trigger_checkout'] as bool?) ?? false,
+      requiresConfirmation: (json['requires_confirmation'] as bool?) ?? false,
+      agentAudioBase64: (json['agent_audio_base64'] as String?) ?? '',
+      agentAudioContentType:
+          (json['agent_audio_content_type'] as String?) ?? 'audio/wav',
+      pendingAction: json['pending_action'] is Map<String, dynamic>
+          ? json['pending_action'] as Map<String, dynamic>
+          : null,
+      actionResult: json['action_result'] is Map<String, dynamic>
+          ? json['action_result'] as Map<String, dynamic>
+          : null,
+      orderId: json['order_id'] as String?,
+      paymentStatus: json['payment_status'] as String?,
     );
   }
 }
@@ -111,6 +144,38 @@ class AgentResponse {
 
 class AgentService {
   static String get _backendUrl => BackendConfig.baseUrl;
+
+  static Map<String, String> _jsonHeaders() {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    return {
+      'Content-Type': 'application/json',
+      if (token != null) 'Authorization': 'Bearer $token',
+    };
+  }
+
+  static List<Map<String, dynamic>> cartContext(List<CartItem> cartItems) {
+    return cartItems
+        .map(
+          (item) => {
+            'menu_item_id': item.menuItemId,
+            'name': item.name,
+            'base_price': item.basePrice,
+            'quantity': item.quantity,
+            'line_total': item.lineTotal,
+            'special_instructions': item.specialInstructions,
+            'modifiers': item.modifiers
+                .map(
+                  (modifier) => {
+                    'id': modifier.id,
+                    'name': modifier.name,
+                    'price_change': modifier.priceChange,
+                  },
+                )
+                .toList(),
+          },
+        )
+        .toList();
+  }
 
   // ---------------------------------------------------------------------------
   // Voice turn (primary path)
@@ -128,15 +193,22 @@ class AgentService {
     required String restaurantId,
     required String sessionId,
     required List<Map<String, dynamic>> menuItems,
+    List<CartItem> cartItems = const [],
+    String? qrLocationId,
+    bool confirmAction = false,
     String language = 'en',
   }) async {
     try {
+      final token = Supabase.instance.client.auth.currentSession?.accessToken;
       final request =
           http.MultipartRequest('POST', Uri.parse('$_backendUrl/agent/voice'))
             ..fields['restaurant_id'] = restaurantId
+            ..fields['qr_location_id'] = qrLocationId ?? ''
             ..fields['session_id'] = sessionId
             ..fields['language'] = language
             ..fields['menu_context'] = jsonEncode(menuItems)
+            ..fields['cart_context'] = jsonEncode(cartContext(cartItems))
+            ..fields['confirm_action'] = '$confirmAction'
             ..files.add(
               http.MultipartFile.fromBytes(
                 'audio',
@@ -144,6 +216,9 @@ class AgentService {
                 filename: 'audio.wav',
               ),
             );
+      if (token != null) {
+        request.headers['Authorization'] = 'Bearer $token';
+      }
 
       final streamed = await request.send().timeout(
         const Duration(seconds: 30),
@@ -174,6 +249,54 @@ class AgentService {
     }
   }
 
+  static Future<AgentResponse> sendRecordingFile({
+    required String recordingPath,
+    required String restaurantId,
+    required String sessionId,
+    required List<Map<String, dynamic>> menuItems,
+    List<CartItem> cartItems = const [],
+    String? qrLocationId,
+    bool confirmAction = false,
+    String language = 'en',
+  }) async {
+    try {
+      final token = Supabase.instance.client.auth.currentSession?.accessToken;
+      final request =
+          http.MultipartRequest('POST', Uri.parse('$_backendUrl/agent/voice'))
+            ..fields['restaurant_id'] = restaurantId
+            ..fields['qr_location_id'] = qrLocationId ?? ''
+            ..fields['session_id'] = sessionId
+            ..fields['language'] = language
+            ..fields['menu_context'] = jsonEncode(menuItems)
+            ..fields['cart_context'] = jsonEncode(cartContext(cartItems))
+            ..fields['confirm_action'] = '$confirmAction'
+            ..files.add(
+              await http.MultipartFile.fromPath('audio', recordingPath),
+            );
+      if (token != null) {
+        request.headers['Authorization'] = 'Bearer $token';
+      }
+
+      final streamed = await request.send().timeout(
+        const Duration(seconds: 45),
+        onTimeout: () =>
+            throw TimeoutException('Agent voice request timed out'),
+      );
+      final body = await streamed.stream.bytesToString();
+      if (streamed.statusCode != 200) {
+        throw Exception('Agent voice error ${streamed.statusCode}: $body');
+      }
+      return AgentResponse.fromJson(jsonDecode(body) as Map<String, dynamic>);
+    } on TimeoutException catch (e) {
+      throw BackendConfig.connectionException(e);
+    } on http.ClientException catch (e) {
+      throw BackendConfig.connectionException(e);
+    } catch (e) {
+      _logger.e('AgentService.sendRecordingFile: $e');
+      rethrow;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Text turn (fallback / testing)
   // ---------------------------------------------------------------------------
@@ -185,19 +308,25 @@ class AgentService {
     required String restaurantId,
     required String sessionId,
     required List<Map<String, dynamic>> menuItems,
+    List<CartItem> cartItems = const [],
+    String? qrLocationId,
+    bool confirmAction = false,
     String language = 'en',
   }) async {
     try {
       final response = await http
           .post(
-            Uri.parse('$_backendUrl/agent/text'),
-            headers: {'Content-Type': 'application/json'},
+            Uri.parse('$_backendUrl/agent/turn'),
+            headers: _jsonHeaders(),
             body: jsonEncode({
               'text': text,
               'restaurant_id': restaurantId,
+              'qr_location_id': qrLocationId,
               'session_id': sessionId,
               'language': language,
               'menu_context': menuItems,
+              'cart_context': cartContext(cartItems),
+              'confirm_action': confirmAction,
             }),
           )
           .timeout(const Duration(seconds: 30));

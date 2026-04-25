@@ -36,6 +36,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(agent.router)
+app.include_router(agent.bunq_router)
 app.include_router(voice.router)
 app.include_router(payments.router)
 app.include_router(payments.compat_router)

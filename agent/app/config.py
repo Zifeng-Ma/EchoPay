@@ -46,6 +46,11 @@ class Settings:
     # --- bunq ---
     bunq_api_key: str | None
     bunq_use_sandbox: bool
+    bunq_oauth_client_id: str | None
+    bunq_oauth_client_secret: str | None
+    bunq_oauth_redirect_uri: str | None
+    bunq_merchant_alias: str | None
+    bunq_merchant_alias_type: str
 
     # --- Supabase (backend service-role — full DB access) ---
     supabase_url: str | None
@@ -71,6 +76,13 @@ class Settings:
         self.anthropic_api_key = _optional("ANTHROPIC_API_KEY")
         self.bunq_api_key = _optional("BUNQ_API_KEY")
         self.bunq_use_sandbox = os.environ.get("BUNQ_USE_SANDBOX", "true").lower() == "true"
+        self.bunq_oauth_client_id = _optional("BUNQ_OAUTH_CLIENT_ID")
+        self.bunq_oauth_client_secret = _optional("BUNQ_OAUTH_CLIENT_SECRET")
+        self.bunq_oauth_redirect_uri = _optional("BUNQ_OAUTH_REDIRECT_URI")
+        self.bunq_merchant_alias = _optional("BUNQ_MERCHANT_ALIAS") or (
+            "sugardaddy@bunq.com" if self.bunq_use_sandbox else None
+        )
+        self.bunq_merchant_alias_type = os.environ.get("BUNQ_MERCHANT_ALIAS_TYPE", "EMAIL")
         self.supabase_url = _optional("SUPABASE_URL")
         self.supabase_service_role_key = _optional("SUPABASE_SERVICE_ROLE_KEY")
         self.supabase_jwt_secret = _optional("SUPABASE_JWT_SECRET")
