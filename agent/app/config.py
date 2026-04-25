@@ -1,9 +1,8 @@
 """
 EchoPay Agent configuration.
 
-Loads from environment via python-dotenv. Required vars are validated at
-module import time — a missing var raises ValueError with the exact var name,
-catching "forgot to copy .env.example → .env" errors at boot, not at runtime.
+Loads from environment via python-dotenv. Only keys required by active routes
+are enforced at startup so local demos are not blocked by unrelated services.
 """
 
 import os
@@ -24,30 +23,52 @@ def _require(name: str) -> str:
     return value
 
 
+def _optional(name: str) -> str | None:
+    """Return the env var value when present, otherwise None."""
+    value = os.environ.get(name)
+    return value or None
+
+
 class Settings:
     """All configuration for the EchoPay agent service."""
 
+    # --- OpenAI ---
+    openai_api_key: str
+    openai_order_model: str
+    openai_transcription_model: str
+    openai_diarization_model: str
+
     # --- Anthropic ---
-    anthropic_api_key: str
+    anthropic_api_key: str | None
 
     # --- bunq ---
-    bunq_api_key: str
+    bunq_api_key: str | None
 
     # --- Supabase (backend service-role — full DB access) ---
-    supabase_url: str
-    supabase_service_role_key: str
-    supabase_jwt_secret: str
+    supabase_url: str | None
+    supabase_service_role_key: str | None
+    supabase_jwt_secret: str | None
 
     # --- Optional (filled after Plan 05 Edge Function deploy) ---
     bunq_webhook_url: str | None
 
     def __init__(self) -> None:
-        self.anthropic_api_key = _require("ANTHROPIC_API_KEY")
-        self.bunq_api_key = _require("BUNQ_API_KEY")
-        self.supabase_url = _require("SUPABASE_URL")
-        self.supabase_service_role_key = _require("SUPABASE_SERVICE_ROLE_KEY")
-        self.supabase_jwt_secret = _require("SUPABASE_JWT_SECRET")
-        self.bunq_webhook_url = os.environ.get("BUNQ_WEBHOOK_URL")
+        self.openai_api_key = _require("OPENAI_API_KEY")
+        self.openai_order_model = os.environ.get("OPENAI_ORDER_MODEL", "gpt-4o-mini")
+        self.openai_transcription_model = os.environ.get(
+            "OPENAI_TRANSCRIPTION_MODEL",
+            "gpt-4o-mini-transcribe",
+        )
+        self.openai_diarization_model = os.environ.get(
+            "OPENAI_DIARIZATION_MODEL",
+            "gpt-4o-transcribe-diarize",
+        )
+        self.anthropic_api_key = _optional("ANTHROPIC_API_KEY")
+        self.bunq_api_key = _optional("BUNQ_API_KEY")
+        self.supabase_url = _optional("SUPABASE_URL")
+        self.supabase_service_role_key = _optional("SUPABASE_SERVICE_ROLE_KEY")
+        self.supabase_jwt_secret = _optional("SUPABASE_JWT_SECRET")
+        self.bunq_webhook_url = _optional("BUNQ_WEBHOOK_URL")
 
 
 # Module-level singleton — instantiated at import time so missing vars fail fast.

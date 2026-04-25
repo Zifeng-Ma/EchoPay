@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # If any required var is missing, the process exits with a descriptive error
 # before uvicorn starts accepting traffic. Intentional.
 from app.config import settings  # noqa: F401
-from app.routes import health
+from app.routes import health, voice
 
 app = FastAPI(
     title="EchoPay Agent",
@@ -35,3 +35,4 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(voice.router)
