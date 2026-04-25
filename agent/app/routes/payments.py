@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.services import bunq_service, supabase_context
+from app.services import bunq_service, customer_provisioning, supabase_context
 from app.services.supabase_context import RequestUser
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -147,13 +147,20 @@ async def pay_order(
 
     token = await supabase_context.get_bunq_payment_token(user.user_id)
     if not token:
+        # Auto-provision a bunq sandbox account on first payment attempt
+        try:
+            log.info("pay_order: auto-provisioning bunq account for user %s", user.user_id)
+            await customer_provisioning.provision_for(user.user_id)
+            token = await supabase_context.get_bunq_payment_token(user.user_id)
+        except Exception as e:
+            log.exception("pay_order: auto-provision failed for user %s", user.user_id)
+            raise HTTPException(
+                status_code=502, detail=f"Failed to provision bunq account: {e}"
+            )
+    if not token:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "User has no bunq account linked. "
-                "Call POST /bunq/provision to auto-create a sandbox account, "
-                "or POST /bunq/oauth/start to connect an existing bunq account."
-            ),
+            detail="Could not obtain a bunq payment token after provisioning.",
         )
     try:
         payment = bunq_service.make_user_payment_from_oauth(

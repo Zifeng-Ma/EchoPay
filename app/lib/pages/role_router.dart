@@ -25,6 +25,15 @@ class _RoleRouterPageState extends State<RoleRouterPage> {
     Widget destination = const UserHomePage();
 
     if (userId != null) {
+      // Ensure the customers row exists (FK for orders)
+      try {
+        await SupabaseService.upsertCustomerProfile({
+          'id': userId,
+        });
+      } catch (e) {
+        debugPrint('RoleRouter: upsertCustomerProfile failed: $e');
+      }
+
       try {
         final restaurant = await SupabaseService.getRestaurantByOwner(userId);
         if (restaurant != null) {

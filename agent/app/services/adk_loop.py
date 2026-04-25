@@ -17,7 +17,7 @@ from google.genai import types
 
 from app.config import settings
 from app.routes.voice import _try_synthesize_speech
-from app.services import bunq_service, supabase_context
+from app.services import bunq_service, customer_provisioning, supabase_context
 from app.services.adk_tools import ADK_TOOLS
 from app.services.supabase_context import AgentContext
 
@@ -618,13 +618,16 @@ async def _execute_pending_action(
         for item in cart_context
     )
     # Resolve bunq token: prefers provisioned sandbox API key over OAuth token
-    payment_token = await supabase_context.get_bunq_payment_token(
-        context.user.user_id if context.user else ""
-    )
+    user_id = context.user.user_id if context.user else ""
+    payment_token = await supabase_context.get_bunq_payment_token(user_id)
     if not payment_token:
         payment_token = supabase_context.decode_stored_secret(
             str((context.bunq_connection or {}).get("access_token_encrypted") or "")
         )
+    if not payment_token and user_id:
+        # Auto-provision a bunq sandbox account
+        await customer_provisioning.provision_for(user_id)
+        payment_token = await supabase_context.get_bunq_payment_token(user_id)
     payment = bunq_service.make_user_payment_from_oauth(
         oauth_access_token=payment_token,
         amount_cents=total_cents,

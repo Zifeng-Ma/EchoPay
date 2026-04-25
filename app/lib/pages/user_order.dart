@@ -9,6 +9,7 @@ import '../services/order.dart';
 import '../services/payment.dart';
 import '../services/provider.dart';
 import '../services/supabase.dart';
+import 'user_home.dart';
 
 class UserOrderPage extends ConsumerStatefulWidget {
   const UserOrderPage({super.key});
@@ -89,6 +90,14 @@ class _UserOrderPageState extends ConsumerState<UserOrderPage> {
         backgroundColor: Colors.white,
         surfaceTintColor: Colors.white,
         elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new_rounded),
+          onPressed: () {
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (_) => const UserHomePage()),
+            );
+          },
+        ),
         title: const Text(
           'Orders',
           style: TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF1A1A2E)),

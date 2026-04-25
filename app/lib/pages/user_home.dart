@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../model/voice_order_result.dart';
 import '../services/agent.dart';
@@ -440,6 +441,7 @@ class _UserHomePageState extends ConsumerState<UserHomePage> {
       final orderId = await OrderService.submitOrder(
         restaurantId: ctx.restaurantId,
         qrLocationId: ctx.qrLocationId,
+        customerId: Supabase.instance.client.auth.currentUser?.id,
         cartItems: cart,
       );
       ref.read(activeOrderIdProvider.notifier).state = orderId;

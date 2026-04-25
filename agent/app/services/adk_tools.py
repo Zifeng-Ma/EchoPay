@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from app.config import settings
 from app.routes.voice import _transcribe_audio, _try_synthesize_speech
-from app.services import bunq_service, supabase_context
+from app.services import bunq_service, customer_provisioning, supabase_context
 from app.services.supabase_context import RequestUser
 
 
@@ -216,13 +216,16 @@ async def execute_bunq_payment(
     if not merchant_alias:
         return {"status": "error", "message": "Restaurant has no bunq payment alias configured."}
 
-    # 3. Resolve customer's bunq token
+    # 3. Resolve customer's bunq token (auto-provision if needed)
     token = await supabase_context.get_bunq_payment_token(user_id)
     if not token:
-        return {
-            "status": "error",
-            "message": "User has no bunq account linked. Call POST /bunq/provision first.",
-        }
+        try:
+            await customer_provisioning.provision_for(user_id)
+            token = await supabase_context.get_bunq_payment_token(user_id)
+        except Exception as exc:
+            return {"status": "error", "message": f"Failed to provision bunq account: {exc}"}
+    if not token:
+        return {"status": "error", "message": "Could not obtain bunq payment token."}
 
     # 4. Execute the bunq payment
     if not description:
