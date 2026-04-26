@@ -221,7 +221,7 @@ class AgentService {
       }
 
       final streamed = await request.send().timeout(
-        const Duration(seconds: 30),
+        const Duration(seconds: 50),
         onTimeout: () =>
             throw TimeoutException('Agent voice request timed out'),
       );
@@ -329,7 +329,7 @@ class AgentService {
               'confirm_action': confirmAction,
             }),
           )
-          .timeout(const Duration(seconds: 30));
+          .timeout(const Duration(seconds: 50));
 
       if (response.statusCode != 200) {
         throw Exception(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -72,6 +73,18 @@ _SESSION_FACTS: dict[tuple[str, str], SessionMemoryState] = {}
 _MENU_INTRO_PROGRESS: dict[tuple[str, str], int] = {}
 _SESSION_SERVICE = InMemorySessionService()
 _RUNNER: Runner | None = None
+
+# Per-session lock prevents concurrent turns from corrupting ADK session state.
+# When a phone disconnects mid-request, the in-flight turn holds the lock until
+# it finishes or times out, then the next request can proceed cleanly.
+_SESSION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+_TURN_TIMEOUT_SECONDS = 45
+
+
+def _session_lock(key: tuple[str, str]) -> asyncio.Lock:
+    if key not in _SESSION_LOCKS:
+        _SESSION_LOCKS[key] = asyncio.Lock()
+    return _SESSION_LOCKS[key]
 
 
 AGENT_INSTRUCTION = """
@@ -195,6 +208,44 @@ async def handle_agent_turn(
     normalized = text.strip()
     user_id = context.user.user_id if context.user else "guest"
     key = (user_id, session_id or "default")
+
+    # Serialize turns per session so a disconnected request finishing won't
+    # collide with the reconnected request. Also apply a total timeout so
+    # a stuck LLM call doesn't block the session forever.
+    lock = _session_lock(key)
+    try:
+        async with asyncio.timeout(_TURN_TIMEOUT_SECONDS):
+            async with lock:
+                return await _handle_agent_turn_inner(
+                    normalized=normalized,
+                    transcript=transcript,
+                    session_id=session_id,
+                    language=language,
+                    context=context,
+                    cart_context=cart_context,
+                    confirm_action=confirm_action,
+                    fallback_context_answerer=fallback_context_answerer,
+                    key=key,
+                )
+    except TimeoutError:
+        return {
+            "message": "Sorry, the request took too long. Please try again.",
+            "action": "none",
+        }
+
+
+async def _handle_agent_turn_inner(
+    *,
+    normalized: str,
+    transcript: str,
+    session_id: str,
+    language: str,
+    context: AgentContext,
+    cart_context: list[dict[str, Any]],
+    confirm_action: bool,
+    fallback_context_answerer: Any = None,
+    key: tuple[str, str],
+) -> dict[str, Any]:
     history = list(_SESSION_MEMORY.get(key, []))
     memory_state = _SESSION_FACTS.get(key, _empty_memory_state())
     turn_analysis = _heuristic_turn_analysis(
